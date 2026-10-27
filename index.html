@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>omp-inn</title>
+    <!-- 首屏防闪烁：在样式生效前把皮肤 class 定好（等 React 起来再切会先闪一帧旧皮肤）。
+         键名 `omp.theme.v1` 与 src/lib/theme.ts 必须一致，改键名要两处一起改。 -->
+    <script>
+      (function () {
+        try {
+          var mode = localStorage.getItem("omp.theme.v1");
+          var dark =
+            mode === "dark" ||
+            (mode !== "light" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+        } catch (e) {
+          /* 无痕模式等取不到持久化时按浅色走 */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

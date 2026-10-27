@@ -1,0 +1,187 @@
+# 打 v* 标签或手动触发：多平台打包并上传到 GitHub Release，同时生成 latest.json 供应用内更新
+# 说明：updater 公钥见 src-tauri/tauri.conf.json plugins.updater.pubkey；
+# 首次发布前：pnpm tauri signer generate -w ~/.tauri/omp-inn.key，把公钥填入配置，
+# 私钥全文写入仓库 Secrets TAURI_SIGNING_PRIVATE_KEY（密码为空则 TAURI_SIGNING_PRIVATE_KEY_PASSWORD 置空）
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 发版前守卫：仓库可见性、签名、版本号与 tag 不一致时直接失败，别产出一个"装不上更新"的 release。
+  guard:
+    name: Guard (可见性 / 签名 / 版本一致性)
+    runs-on: ubuntu-latest
+    steps:
+      # 私有仓库会让应用内更新静默失效：updater 匿名拉 latest.json，GitHub 对匿名一律 404。本步不需要 checkout。
+      - name: 仓库必须公开（updater 匿名拉取 latest.json）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VIS=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .visibility)
+          if [ "$VIS" != "public" ]; then
+            echo "::error::仓库当前为 ${VIS}。updater 匿名拉取 releases/latest/download/latest.json 时会被 GitHub 以 404 拒绝（应用内报 Could not fetch a valid release JSON from the remote）。请改回 public 再发版。"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+
+      - name: updater pubkey 必须已配置
+        run: |
+          if grep -q 'TODO' src-tauri/tauri.conf.json; then
+            echo "::error::tauri.conf.json 的 plugins.updater.pubkey 仍是 TODO 占位。先执行 pnpm tauri signer generate -w ~/.tauri/omp-inn.key，把公钥填进配置、私钥全文写进仓库 Secrets TAURI_SIGNING_PRIVATE_KEY（见 docs/integrations.md 的「更新链路」）。"
+            exit 1
+          fi
+
+      # macOS 产物的签名身份必须固定，否则 TCC 授权（桌面/文稿/下载文件夹）每次更新都重弹。
+      # 自签名证书由 bash scripts/make-signing-cert.sh 生成，两个 secrets 从脚本产物设置。
+      - name: macOS 签名证书 secrets 必须已配置
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASS: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$CERT" ] || [ -z "$CERT_PASS" ]; then
+            echo "::error::缺少 APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD。本机执行 bash scripts/make-signing-cert.sh 生成自签名证书，再按脚本末尾提示设置两个 secrets（见 README「本机发布构建」）。"
+            exit 1
+          fi
+
+
+      - name: tag 与 package.json 版本一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag v$TAG 与 package.json 的 $PKG 不一致；发版前先升版本号并同步 CHANGELOG。"
+            exit 1
+          fi
+
+  publish:
+    needs: guard
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            platform: macos-latest
+            args: ""
+          - name: macOS Intel
+            platform: macos-15-intel
+            args: ""
+          - name: Linux x64
+            platform: ubuntu-24.04
+            args: ""
+          - name: Windows x64
+            platform: windows-latest
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xdg-utils \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libgtk-3-dev
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.platform }}
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Release 说明与 latest.json 的 notes 都取 CHANGELOG 里本版本的整节说明：
+      # 应用内更新弹窗把 notes 当「这次改了什么」显示，写一句「见 CHANGELOG.md」等于什么都没说。
+      # 版本节缺失 / 为空会让这一步失败——发版前没更新 CHANGELOG 就别想发出 Release。
+      - name: 取本版本更新说明（CHANGELOG 版本节）
+        run: |
+          {
+            echo 'RELEASE_BODY<<CHANGELOG_EOF'
+            node scripts/changelog-notes.mjs
+            echo 'CHANGELOG_EOF'
+          } >> "$GITHUB_ENV"
+
+      - name: Build and upload to Release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS 签名：证书 base64 + 密码交给 tauri CLI，它自己导入临时钥匙串后签名；
+          # APPLE_SIGNING_IDENTITY 指定用哪个身份签（CN 与 p12 里的证书一致；
+          # 覆盖 tauri.conf.json 的 "-" 基线）。其它平台的构建忽略这三个 env。
+          APPLE_SIGNING_IDENTITY: "Apple Development: omp-inn Signing"
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: omp-inn v__VERSION__
+          releaseBody: ${{ env.RELEASE_BODY }}
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: true
+          args: ${{ matrix.args }}
+
+  # tauri-action 生成的 latest.json 用的是 api.github.com 资产 API 链接：匿名限流 60 次/小时/出口 IP，
+  # 应用内 updater 经系统代理从共享节点下载会 403（检查更新走 github.com 网页域不受限，表现为「能检查、下载 403」）。
+  # 发布完成后统一改写为 releases/download 公开直链（GitHub CDN 无限流），
+  # 并把 notes 换成 CHANGELOG 里本版本的整节说明（应用内更新弹窗显示的「更新内容」就是它）。
+  fixup:
+    needs: publish
+    name: Fixup latest.json (资产 API 链接 → 公开直链 + notes 回填)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: 改写 latest.json 并回传
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v$(node -p "require('./package.json').version")"
+          mkdir -p "$RUNNER_TEMP/updater"
+          gh release download "$TAG" --pattern latest.json --dir "$RUNNER_TEMP/updater" --clobber
+          node scripts/fixup-latest-json.mjs "$RUNNER_TEMP/updater/latest.json" "$TAG"
+          gh release upload "$TAG" "$RUNNER_TEMP/updater/latest.json" --clobber

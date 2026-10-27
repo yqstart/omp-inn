@@ -1,0 +1,50 @@
+[package]
+name = "omp-inn"
+version = "0.1.0"
+description = "oh-my-pi 极简桌面端"
+authors = ["omp-inn"]
+edition = "2021"
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
+libc = "0.2"
+portable-pty = "0.9"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "process", "io-util", "sync", "time", "net"] }
+chrono = { version = "0.4", features = ["serde"] }
+tauri-plugin-notification = "2.5.1"
+# 手机远程控制（V50）：内嵌 HTTP/WS 服务 + 扫码配对。
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["compression-gzip", "limit", "timeout"] }
+futures-util = "0.3"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+if-addrs = "0.15"
+sha2 = "0.10"
+rand = "0.9"
+base64 = "0.22"
+subtle = "2"
+# 会话图片：解码 omp 的 blob（PNG / JPEG / WebP / GIF）后写入系统剪贴板。
+# arboard 负责平台剪贴板（macOS NSPasteboard / Windows 剪贴板 / Linux X11+Wayland），
+# image 只开这四种格式的 decoder——不启用默认的全量编码器，避免白编译一串无用格式。
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[dev-dependencies]
+# 真机 RPC 冒烟测试（runtime.rs 的 `real_rpc_*`，默认 `--ignored`）：mock app 提供
+# AppHandle，不需要真实窗口；见 modules 测试模块的说明。
+tauri = { version = "2", features = ["test"] }

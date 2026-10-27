@@ -1,0 +1,38 @@
+name: 功能建议
+description: 提出新功能或体验改进
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本项目聚焦聊天形态的 omp 桌面工作台，明确不做：内置编辑器、内置浏览器、
+        SSH、原生移动端 App、远程桌面、PR 集成、分屏与多窗口、
+        worktree 生命周期管理、云同步、定时任务、目标模式与计划模式入口。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题 / 场景
+      description: 你在什么情况下需要这个能力？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 可以只描述目标交互，不一定要有实现细节
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 可选替代方案
+      description: 你考虑过的其他做法（可选）
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 对你的重要程度
+      options:
+        - 阻塞日常使用
+        - 明显提升效率
+        - 锦上添花

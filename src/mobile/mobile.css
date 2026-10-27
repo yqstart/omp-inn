@@ -1,0 +1,87 @@
+/* 手机远程控制壳的专属布局。颜色 / 字体全部复用 index.css 的 token，不另起一套。 */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+.mobile-root {
+  height: 100vh;
+  height: var(--mobile-vvh, 100dvh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--background);
+  color: var(--foreground);
+  overscroll-behavior-y: none;
+}
+
+.mobile-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.mobile-thread {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Thread 在桌面端按中列 85% 宽排版；手机上铺满并收一点内边距。 */
+.mobile-thread .thread-scroll {
+  max-width: 100%;
+  padding-left: 14px;
+  padding-right: 14px;
+  padding-top: 14px;
+  padding-bottom: 14px;
+}
+
+.mobile-composer {
+  flex-shrink: 0;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding-bottom: calc(10px + env(safe-area-inset-bottom));
+}
+
+.mobile-composer textarea {
+  font-size: 16px; /* iOS 输入框 <16px 会触发自动放大 */
+  line-height: 1.5;
+}
+
+/* iOS 对 <16px 的输入控件会在聚焦时自动放大；移动壳里统一抬到 16px。 */
+.mobile-root input,
+.mobile-root textarea,
+.mobile-root select {
+  font-size: 16px;
+}
+
+.mobile-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgb(0 0 0 / 45%);
+  display: flex;
+  align-items: flex-end;
+}
+
+.mobile-sheet {
+  width: 100%;
+  max-height: 88dvh;
+  overflow-y: auto;
+  border-radius: 18px 18px 0 0;
+  background: var(--elevated);
+  border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.mobile-list-row {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mobile-safe-top {
+  padding-top: env(safe-area-inset-top);
+}

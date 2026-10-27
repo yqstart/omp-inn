@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞（请勿公开提 Issue）
+    url: https://github.com/yqstart/omp-inn/security/advisories/new
+    about: 请走私有漏洞报告流程，详见 SECURITY.md
+  - name: 使用问题讨论
+    url: https://github.com/yqstart/omp-inn/discussions
+    about: 不确定是 bug 还是用法问题时，先来这里讨论

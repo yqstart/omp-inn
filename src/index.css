@@ -1,0 +1,685 @@
+@import "tailwindcss";
+
+/* 中性工作台（对齐 Codex app / ZCode 的色感）：灰阶层级 + 黑色透明边框 + 单一 OpenAI 蓝强调。
+   主按钮（primary）= 近黑实心，白字——深浅两套皮肤的主动作语言与两家一致。 */
+:root {
+ --background: #f9f9f9;
+ --sidebar: #f3f3f3;
+ --surface: #ffffff;
+ --elevated: #ffffff;
+ --foreground: #1a1c1f;
+ --muted: #5d5d5d;
+ --faint: #767676;
+ --border: rgb(13 13 13 / 12%);
+ --border-soft: rgb(13 13 13 / 7%);
+ --accent: #0169cc;
+ --primary: #1a1c1f;
+ --primary-foreground: #ffffff;
+ --danger: #dc2626;
+ --warn: #b45309;
+ --ok: #047857;
+ --code: #f0f0f0;
+ --hover: rgb(13 13 13 / 5%);
+ --active: rgb(13 13 13 / 9%);
+
+ /* ---- 终端 16 色（V42 右栏终端，xterm.js）----
+    xterm 的 theme 只吃具体颜色、不吃 CSS 变量，所以由 `lib/termTheme.ts` 在运行时
+    把下面这些 token 的**当前值**读出来喂给它——两套皮肤共用一份 token 的规矩不破。 */
+ --term-background: var(--background);
+ --term-foreground: var(--foreground);
+ --term-cursor: var(--accent);
+ --term-black: #3a4145;
+ --term-red: #dc2626;
+ --term-green: #047857;
+ --term-yellow: #b45309;
+ --term-blue: #0169cc;
+ --term-magenta: #9333ea;
+ --term-cyan: #0e7490;
+ --term-white: #626c74;
+ --term-bright-black: #626c74;
+ --term-bright-red: #ef4444;
+ --term-bright-green: #059669;
+ --term-bright-yellow: #d97706;
+ --term-bright-blue: #0285ff;
+ --term-bright-magenta: #a855f7;
+ --term-bright-cyan: #0891b2;
+ --term-bright-white: #1e2226;
+}
+
+/* 深色走中性近黑（对齐 Codex app 的灰阶：左栏最深、工作面次之、浮层最亮）；
+   边框 / 悬停 / 选中一律用白色透明度——比实色灰更细腻，也避免蓝偏。 */
+.dark {
+ --background: #181818;
+ --sidebar: #121212;
+ --surface: #212121;
+ --elevated: #303030;
+ --foreground: #e6e6e6;
+ --muted: #a8a8a8;
+ --faint: #8f8f8f;
+ --border: rgb(255 255 255 / 10%);
+ --border-soft: rgb(255 255 255 / 6%);
+ --accent: #339cff;
+ --primary: #ffffff;
+ --primary-foreground: #0d0d0d;
+ --danger: #f87171;
+ --warn: #fbbf24;
+ --ok: #34d399;
+ --code: #101010;
+ --hover: rgb(255 255 255 / 7%);
+ --active: rgb(255 255 255 / 11%);
+
+ /* 终端 16 色（深色档；口径同 :root 的注释） */
+ --term-background: var(--background);
+ --term-foreground: var(--foreground);
+ --term-cursor: var(--accent);
+ --term-black: #333333;
+ --term-red: #f87171;
+ --term-green: #34d399;
+ --term-yellow: #fbbf24;
+ --term-blue: #339cff;
+ --term-magenta: #c084fc;
+ --term-cyan: #22d3ee;
+ --term-white: #a8a8a8;
+ --term-bright-black: #8f8f8f;
+ --term-bright-red: #fca5a5;
+ --term-bright-green: #6ee7b7;
+ --term-bright-yellow: #fcd34d;
+ --term-bright-blue: #66b5ff;
+ --term-bright-magenta: #d8b4fe;
+ --term-bright-cyan: #67e8f9;
+ --term-bright-white: #e8e8e8;
+}
+
+/* ---- 语义层 token（MASTER §2.4，v2 落地）----
+   跨组件的布局决策进这里（禁止组件里散落魔数）；都是尺寸、与配色无关，深浅两套共用。
+   新增 token 的判据是「表达可复用决策」——只在一处用到的数值放组件局部。 */
+:root {
+ --h-chrome: 44px;
+ /* 顶栏（中列 TopBar / 右栏区块面板头；左栏顶行与红绿灯同带，走局部 32px） */
+ --h-row: 28px;
+ /* 菜单行 / 紧凑动作行 */
+ --h-row-lg: 32px;
+ /* 列表行（会话行 / 结果行） */
+ --w-sidebar: 292px;
+ /* 左栏默认宽（与 stores/app 的 SIDEBAR_DEFAULT 同步；可拖 292–480） */
+ --w-panel: 320px;
+ /* 右栏工作台默认宽（V42；实际值由 `store.workbenchWidth` 驱动——左缘可拖 260–640） */
+ --measure-content: min(88rem, 85%);
+ /* 中列内容测量宽（消息流正文 / 输入卡 / 目标行 / 查找条 / 归档提示）：中列 85%，两侧各留 7.5%，
+    超宽屏（中列 > 1656px）封顶 88rem。`85%` 相对各自包含块——用到它的元素外层**不许再挂水平内边距**：
+    挂上就把基准缩成「中列 − 2×内边距」，卡比正文窄一截、看着像没对齐（MASTER §3 / §4.4） */
+ --w-menu-sm: 14rem;
+ --w-menu-md: 18rem;
+ /* 菜单宽两档（行钮浮层用） */
+ --w-settings-nav: 176px;
+ /* 设置左导航宽（v3 设置重构：文字档；图标档 44px 由组件内的容器查询切换） */
+}
+
+@theme inline {
+ --color-background: var(--background);
+ --color-sidebar: var(--sidebar);
+ --color-foreground: var(--foreground);
+ --color-muted: var(--muted);
+ --color-faint: var(--faint);
+ --color-surface: var(--surface);
+ --color-elevated: var(--elevated);
+ --color-border: var(--border);
+ --color-border-soft: var(--border-soft);
+ --color-accent: var(--accent);
+ --color-primary: var(--primary);
+ --color-primary-foreground: var(--primary-foreground);
+ --color-danger: var(--danger);
+ --color-warn: var(--warn);
+ --color-ok: var(--ok);
+ --color-code: var(--code);
+ --color-hover: var(--hover);
+ --color-active: var(--active);
+
+ /* 统一控件、卡片与工作面的轮廓。 */
+ --radius-sm: 5px;
+ --radius-md: 8px;
+ --radius-lg: 12px;
+ --radius-xl: 16px;
+ --radius-2xl: 20px;
+
+ --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", Inter, sans-serif;
+ --font-mono: "JetBrains Mono", "SF Mono", Menlo, monospace;
+
+ /* 弹层阴影：深色下阴影几乎不可见，靠 --elevated 的亮度差与边框定型 */
+ --shadow-pop: 0 12px 32px -12px rgb(0 0 0 / 0.45), 0 0 0 1px var(--border);
+ --shadow-dialog: 0 24px 64px -16px rgb(0 0 0 / 0.5), 0 0 0 1px var(--border);
+}
+
+body {
+ height: 100%;
+ background-color: var(--background);
+ color: var(--foreground);
+ font-family: var(--font-sans);
+ font-size: 14px;
+ line-height: 1.55;
+ -webkit-font-smoothing: antialiased;
+ text-rendering: optimizeLegibility;
+}
+
+#root {
+ height: 100%;
+ /* `clip` 而非 `hidden`：应用外壳是输入法光标越界时祖先链上**唯一**的可滚动容器，
+    `hidden` 下浏览器为露出输入法光标会把整窗 scrollLeft 推进去——表现就是整个工作区
+    被横向推偏（左栏一起走）。`clip` 不产生滚动容器，谁也推不动。 */
+ overflow: hidden;
+ overflow: clip;
+}
+
+/* 锁死视口：窗口级永远不滚，滚动只发生在消息列内部 */
+html,
+body {
+ overflow: hidden !important;
+ overscroll-behavior: none;
+}
+
+::selection {
+ background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+/* 等宽文本一律等宽数字：时间、token 数、行号对齐不跳动 */
+.font-mono {
+ font-variant-numeric: tabular-nums;
+}
+
+/* 快捷键键帽（kbd）一律走系统 UI 字体，不挂等宽栈：mac 的修饰键符号（⌘⇧⌥⌃）在 Menlo
+   里是另画的一套「小图标」——墨迹只有大写字高的七成左右（⇧ 76%、⌘ 73%、⌥ 66%、⌃ 47%），
+   ⌘⌥⌃ 还整体浮在基线上方，与字母的大小、基线都对不齐（用户实测：`⇧⌘K`）。系统字体
+   （SF Pro）里这组符号与字母是同一套设计——macOS 菜单的快捷键就是这个观感。
+   组件里不要再给 kbd 挂 font-mono（class 会盖掉这条元素规则）。 */
+kbd {
+ font-family: var(--font-sans);
+}
+
+/* 全应用不显示滚动条（滚动照常：滚轮 / 触控 / 键盘 / 程序化滚动都与滑块无关）。
+   口径：壳里任何滚动容器（设置页、左栏、标签栏、弹窗列表、代码块…）都不画滑块——
+   滚动条在这些窄容器里既占宽又和卡片边框打架；可滚动性由内容裁切 + 滚动行为本身表达。
+   注意：WebKit（含 Tauri 的 WKWebView）里仅 `::-webkit-scrollbar { display:none }` 可靠，
+   `scrollbar-width: none` 是 Firefox 专用，在 WKWebView 下无效——只写后者不会生效。 */
+* {
+ scrollbar-width: none;
+ -ms-overflow-style: none;
+}
+
+*::-webkit-scrollbar {
+ width: 0;
+ height: 0;
+ display: none;
+}
+
+*::-webkit-scrollbar-thumb,
+*::-webkit-scrollbar-track {
+ display: none;
+ background: transparent;
+}
+
+/* 聊天消息列的滚动容器（`Thread` 的 `thread-scroll`）：滚动条同样交给上面的全 app 口径，
+   这里只负责“它必须是个滚动容器”。V1–V10 的 `index.css` 里有同名的这条规则
+   （`overflow-y: scroll` + `overscroll-behavior: contain`），V11 重写样式时被并进
+   `.no-scrollbar`、随聊天界面一起删除；**V32 恢复聊天形态时只取回了组件、没取回它**——
+   于是消息列没有 overflow：内容直接溢出到输入框那一条（浏览器把它画在输入框卡片周围，
+   就是用户实测的「文字重叠」），跟随滚动 / 回看增量 / `onScroll` 加载更早 / 切会话读底
+   这些靠 `scrollTop` 的逻辑也全部落空。改这一块前先确认它在（有单测与实测口径：
+   正文超出一屏时 `scrollHeight > clientHeight`、`scrollTop` 能被程序化写到非 0）。 */
+.thread-scroll {
+ overflow-y: auto;
+ overscroll-behavior: contain;
+}
+
+/* 轮次定位轨（`thread/TurnRail.tsx`）的轨内滚动：轮次一多就在这条轨里滚。
+   两端淡出只在那一端真的还有内容时挂（组件按 scrollTop 加类）——短轨淡了会像缺一截；
+   滚动条口径仍归上面的全 app 规则（不画滑块）。 */
+.turn-rail-scroll {
+ overscroll-behavior: contain;
+}
+
+/* 轨上的刻度：键盘焦点框画在杠所在的 20×10 区域（组件里的 accent 描边），不套全局按钮
+   焦点环——28px 宽的外框比「当前轮」那道杠还抢眼，焦点与当前轮就分不清了（上游同口径）。 */
+.turn-rail-mark:focus-visible {
+ outline: none;
+}
+
+.turn-rail-fade-top {
+ -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 24px);
+ mask-image: linear-gradient(to bottom, transparent 0, #000 24px);
+}
+
+.turn-rail-fade-bottom {
+ -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
+ mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
+}
+
+.turn-rail-fade-top.turn-rail-fade-bottom {
+ -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
+ mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
+}
+
+/* 预览卡：只淡入 + `top` 短过渡（在两道刻度之间移动时卡片滑过去，不是瞬移）。
+   `top` 由标记中心实测写入，轨内滚动时不动它（上游「预览跟指针，不跟滚动」同口径）。 */
+@keyframes turn-rail-preview-in {
+ from {
+  opacity: 0;
+ }
+
+ to {
+  opacity: 1;
+ }
+}
+
+.turn-rail-preview {
+ animation: turn-rail-preview-in 0.12s ease-out;
+ transition: top 0.14s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+ .turn-rail-preview {
+  transition: none;
+ }
+}
+
+/* 可见焦点环（MASTER §5）。输入框类由容器接管焦点样式，此处排除避免生硬外框。 */
+:where(button, a, select, [tabindex]):focus-visible {
+ outline: 2px solid color-mix(in srgb, var(--accent) 75%, transparent);
+ outline-offset: 1px;
+}
+
+:where(input, textarea):focus-visible {
+ outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+ outline-offset: 0;
+}
+
+/* 焦点已由容器表达的输入框关掉内层焦点环（左栏搜索框、会话输入框：容器 `focus-within`
+   变外框，内层再来一圈就是双框——输入框比卡片小一圈且无圆角，那圈方形描边会横跨卡片圆角）。
+   这里的自定义 CSS 不分层，优先级高于 utilities——Tailwind 的 `outline-none` 压不住上面那条，
+   只能用这个类显式关掉。 */
+.no-focus-ring:focus-visible {
+ outline: none;
+}
+
+/* 草稿编辑器（Lexical）：段落零间距（等价于旧 textarea 的连续文本流），
+   空段落也保留行高——否则空输入框会塌成一条线。 */
+.draft-editor p {
+ margin: 0;
+ min-height: 1.5em;
+}
+
+/* `<details>` 的原生三角：WKWebView 里 `::-webkit-details-marker` 不总是生效，
+   必须同时关掉 `list-style` 才会消失（思考折叠卡、项目分组都用 summary 当行头）。 */
+summary {
+ list-style: none;
+}
+
+summary::-webkit-details-marker {
+ display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+ *,
+ *::before,
+ *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  /* 连入场错峰也免掉：降低动效偏好的用户不该看到半截入场动画挂着 */
+  animation-delay: 0.01ms !important;
+  transition-duration: 0.01ms !important;
+ }
+}
+
+/* ---- 流式光标（AssistantText 的行尾）----
+   细竖线 + 平滑呼吸（V37）：高度跟行高走（1.05em），读起来是「笔尖还在写」。
+   `prefers-reduced-motion` 由上面的全局规则收敛（动画时长归零）。 */
+.stream-caret {
+ height: 1.05em;
+ animation: caret-breathe 1.1s ease-in-out infinite;
+}
+
+@keyframes caret-breathe {
+
+ 0%,
+ 100% {
+  opacity: 1;
+ }
+
+ 50% {
+  opacity: 0.25;
+ }
+}
+
+/* ---- 设置内容留白（2026-10-19）----
+   顶部 / 左右 / 底部的页面留白由 `SettingsPage` 的内容容器**一处**给（见该文件的容器类）；
+   面板（`.settings-panel` = 各条目的根元素）的首个内容块一律不带上外边距——各页首块
+   原来各写各的 `mt-*`，首屏间距就成了 16 / 28 / 40 三种（用户实测「每个菜单的边距都不一样」）。
+   首块随数据状态变化（加载 / 空态 / 出错 / 有数据）也吃这一条，所以各页顶距恒定。 */
+.settings-panel> :first-child {
+ margin-top: 0;
+}
+
+/* ---- 设置搜索定位（v3）----
+   从搜索结果跳到某个设置行时闪一下底（一次性，结束时回到透明；reduced-motion 由全局规则收敛）。 */
+.setting-flash {
+ border-radius: var(--radius-sm);
+ animation: setting-flash 1.6s ease-out 1;
+}
+
+@keyframes setting-flash {
+
+ 0%,
+ 35% {
+  background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+ }
+
+ 100% {
+  background-color: transparent;
+ }
+}
+
+/* ---- 会话行状态点（2026-10-19，形态照 DeepSeek Harness 的 StateDot）----
+   三档可见状态：运行中 = 中性灰转圈环（淡轨道 + 一段转动的弧）、已完成未查看 = 绿实心点、
+   待处理 = 橙实心点；空闲不渲染（行首 16px 槽位仍占位，标题列不错行）。
+   参数逐项对齐上游：环 14px SVG / 弧 `stroke-width 2` / 轨道 `opacity .25` /
+   弧 `dasharray 12 150`、1.5s 匀速旋转 + 1.5s 弧长伸缩；实心点 = 10px 容器里 `inset 20%`
+   的圆（视觉 6px）。颜色只给「要你关注」的档位（完成 / 待处理），进行中保持中性灰。 */
+.status-dot {
+ position: relative;
+ display: inline-block;
+ flex: none;
+}
+
+.status-dot::after {
+ content: "";
+ position: absolute;
+ inset: 20%;
+ border-radius: 50%;
+ background: currentColor;
+}
+
+.status-dot[data-state="done"] {
+ color: var(--ok);
+}
+
+.status-dot[data-state="awaiting"] {
+ color: var(--warn);
+}
+
+.status-spinner {
+ flex: none;
+ color: var(--faint);
+}
+
+.status-spinner-track,
+.status-spinner-arc {
+ fill: none;
+ stroke: currentColor;
+ stroke-width: 2;
+ stroke-linecap: round;
+}
+
+.status-spinner-track {
+ opacity: 0.25;
+}
+
+.status-spinner-arc {
+ stroke-dasharray: 12 150;
+ animation: status-dot-dash 1.5s ease-in-out infinite;
+}
+
+.status-spinner-motion {
+ transform-origin: center;
+ animation: status-dot-spin 1.5s linear infinite;
+}
+
+@keyframes status-dot-spin {
+ to {
+  transform: rotate(360deg);
+ }
+}
+
+@keyframes status-dot-dash {
+ 0% {
+  stroke-dasharray: 12 150;
+  stroke-dashoffset: 0;
+ }
+
+ 50% {
+  stroke-dasharray: 24 150;
+  stroke-dashoffset: -6;
+ }
+
+ 100% {
+  stroke-dasharray: 12 150;
+  stroke-dashoffset: 0;
+ }
+}
+
+/* 降低动效偏好：环不转，但仍是一枚完整的环（上游同款静态弧 18/150、offset -3） */
+@media (prefers-reduced-motion: reduce) {
+
+ .status-spinner-motion,
+ .status-spinner-arc {
+  animation: none;
+ }
+
+ .status-spinner-arc {
+  stroke-dasharray: 18 150;
+  stroke-dashoffset: -3;
+ }
+}
+
+/* ---- Markdown 正文（AssistantText）----
+   渲染走 react-markdown（不注入原始 HTML），这里只补排版。 */
+.md-body {
+ overflow-wrap: anywhere;
+}
+
+.md-body> :first-child {
+ margin-top: 0;
+}
+
+.md-body> :last-child {
+ margin-bottom: 0;
+}
+
+.md-body p {
+ margin: 0.5rem 0;
+}
+
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+ margin: 1rem 0 0.5rem;
+ font-weight: 600;
+ line-height: 1.35;
+ /* 标题走「accent 调进正文墨色」的中间调：有色彩倾向但不抢正文（单强调色约束不破，
+    用的还是 accent，只是与 foreground 混过一道，深浅两套皮肤各自成立）。 */
+ color: color-mix(in srgb, var(--accent) 50%, var(--foreground));
+}
+
+.md-body h1,
+.md-body h2 {
+ padding-bottom: 0.2rem;
+ border-bottom: 1px solid var(--border-soft);
+}
+
+.md-body h1 {
+ font-size: 1.25rem;
+}
+
+.md-body h2 {
+ font-size: 1.125rem;
+}
+
+.md-body h3 {
+ font-size: 1rem;
+}
+
+.md-body h4 {
+ font-size: 0.9375rem;
+}
+
+.md-body ul,
+.md-body ol {
+ margin: 0.5rem 0;
+ padding-left: 1.25rem;
+}
+
+.md-body ul {
+ list-style: disc;
+}
+
+.md-body ol {
+ list-style: decimal;
+}
+
+/* 列表符号走 accent：条目密集时它是整段正文里唯一的彩色锚点 */
+.md-body li::marker {
+ color: var(--accent);
+}
+
+.md-body li {
+ margin: 0.15rem 0;
+}
+
+.md-body li>ul,
+.md-body li>ol {
+ margin: 0.15rem 0;
+}
+
+.md-body blockquote {
+ margin: 0.5rem 0;
+ border-left: 3px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+ padding-left: 0.75rem;
+ color: var(--muted);
+}
+
+.md-body a {
+ color: var(--accent);
+ text-decoration: underline;
+ text-underline-offset: 2px;
+}
+
+.md-body hr {
+ margin: 1rem 0;
+ border: 0;
+ border-top: 1px solid var(--border);
+}
+
+/* 行内代码与代码块同底色，避免出现"两种灰"；行内代码的字色再带一点 accent，
+   与代码块里的高亮词（关键字 accent / 字符串 ok / 数字 warn）连成一套。 */
+.md-body code {
+ background: var(--code);
+ border-radius: 4px;
+ padding: 0.1rem 0.3rem;
+ font-family: var(--font-mono);
+ font-size: 0.8125rem;
+ color: color-mix(in srgb, var(--accent) 65%, var(--foreground));
+}
+
+.md-body pre code {
+ background: transparent;
+ padding: 0;
+ font-size: inherit;
+ color: inherit;
+}
+
+/* 表格：宽度按内容撑开，横滚交给外层容器（375px 不撑破） */
+.md-body table {
+ width: max-content;
+ min-width: 100%;
+ border-collapse: collapse;
+ font-size: 0.8125rem;
+}
+
+.md-body th,
+.md-body td {
+ border: 1px solid var(--border);
+ padding: 0.25rem 0.5rem;
+ text-align: left;
+}
+
+.md-body th {
+ background: var(--code);
+ font-weight: 600;
+ color: color-mix(in srgb, var(--accent) 45%, var(--foreground));
+}
+
+/* 代码高亮（highlight.js 类名）：用项目 token 派生，深浅色自动跟随，不引第三方主题 CSS */
+.hljs-comment,
+.hljs-quote {
+ color: var(--muted);
+ font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-doctag,
+.hljs-type,
+.hljs-name,
+.hljs-strong {
+ color: var(--accent);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute {
+ color: var(--ok);
+}
+
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-link,
+.hljs-selector-attr,
+.hljs-selector-pseudo {
+ color: var(--warn);
+}
+
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.function_,
+.hljs-built_in {
+ color: var(--foreground);
+ font-weight: 600;
+}
+
+.hljs-attr,
+.hljs-property,
+.hljs-params {
+ color: var(--foreground);
+}
+
+.hljs-deletion {
+ color: var(--danger);
+}
+
+.hljs-emphasis {
+ font-style: italic;
+}
+
+/* 会话内查找（⌘F）的高亮：CSS Custom Highlight API，不动 DOM 结构。
+   浅 / 深皮肤共用同一层黄，靠透明度适配（当前项更实）。 */
+::highlight(omp-find) {
+ background-color: rgba(250, 204, 21, 0.32);
+}
+
+::highlight(omp-find-active) {
+ background-color: rgba(250, 204, 21, 0.62);
+}
+
+/* 远程控制配对二维码：后端生成的 SVG 带固定像素宽高，可能大于卡内 240px 容器；
+   在卡内按 100% 缩放，避免溢出白底圆角卡造成“偏移 / 缺口”的观感。 */
+.remote-qr svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
