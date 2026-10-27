@@ -242,10 +242,11 @@ mod tests {
             ..Default::default()
         };
 
-        // 从旧项目位置删掉，再在别处建一个同名目录：身份不同，不许认领。
-        fs::remove_dir_all(root.join("work")).unwrap();
+        // 先在别处建一个同名目录、再删旧位置：旧目录还在时创建，inode 才必然不同。
+        // 反过来（先删再建）会让 Linux 复用刚释放的 inode，测试变成验证文件系统行为。
         let decoy = root.join("other").join("proj");
         fs::create_dir_all(&decoy).unwrap();
+        fs::remove_dir_all(root.join("work")).unwrap();
         assert!(!sync_project_paths(&mut ov));
         assert_eq!(Path::new(&ov.projects[0].path), old.as_path());
         let _ = fs::remove_dir_all(&root);
