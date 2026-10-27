@@ -39,12 +39,52 @@ fn directory_identity(path: &Path) -> Option<String> {
 
 #[cfg(windows)]
 fn directory_identity(path: &Path) -> Option<String> {
-    use std::os::windows::fs::MetadataExt;
-    let md = std::fs::metadata(path).ok()?;
-    if !md.is_dir() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    if !std::fs::metadata(path).ok()?.is_dir() {
         return None;
     }
-    Some(format!("{}:{}", md.volume_serial_number()?, md.file_index()?))
+
+    // 打开目录必须带 FILE_FLAG_BACKUP_SEMANTICS；只申请读属性权限，
+    // 共享读写删，避免目录正被其他程序重命名 / 删除时被我们锁住。
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return None;
+    }
+
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    if index == 0 {
+        return None;
+    }
+    Some(format!("{}:{}", info.dwVolumeSerialNumber, index))
 }
 
 #[cfg(not(any(unix, windows)))]

@@ -73,3 +73,20 @@ jobs:
 
       - name: Cargo test
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  # Release 构建覆盖 Windows，但 Linux CI 不会编译 cfg(windows) 代码：
+  # 曾因此让 std 的 unstable Windows API 一路过 CI，直到 tag 打包才失败。
+  windows:
+    name: Windows check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml
