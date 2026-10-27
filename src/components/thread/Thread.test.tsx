@@ -400,6 +400,13 @@ describe("回到底部按钮与贴底跟随（V47 / V49）", () => {
   await act(async () => {
    root.render(createElement(Thread));
   });
+  // 挂载 effect 会排双 rAF 读底；CI 慢时它会晚于下面的假布局 / 用户上翻执行，
+  // 把位置重新拽回底部，表现为偶发「expected 1000 to be 300」。等它跑完再摆布局。
+  await act(async () => {
+   await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+   });
+  });
   const scroller = container.querySelector(".thread-scroll") as HTMLElement;
   let high = CONTENT;
   let view = VIEW;
