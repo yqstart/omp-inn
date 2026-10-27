@@ -142,7 +142,9 @@
 - **读数与签名身份绑定**：ad-hoc 签名 / 证书轮换会让 TCC 记录与当前签名身份对不上（tccd 日志 `Failed to match existing code requirement` + 屏幕录制 `does not allow prompting`），开关看着开着、API 全是 false。用户报「computer use 没有权限」先看这一页。
 - 面板挂载期间每 2 秒回读（本地查询、单飞；唯一的子进程动作是自动化那档的「拉起 System Events」）+ 窗口重新获得焦点立刻读。
 - 屏幕录制未授权时恒挂「退出并重新打开本应用」提示（macOS 对新进程才生效）。
-- 「去授权」= `open` + `x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles / Privacy_Accessibility / Privacy_ScreenCapture / Privacy_Automation`。
+- 「去授权」由用户主动触发：完全磁盘访问先在访达中定位当前可执行文件所属的应用包，再打开系统设置，由用户点击“+”选择应用；开发模式没有应用包时只打开设置，需使用打包应用。辅助功能与屏幕录制首次调用系统请求接口，仍未授权时再次点击打开对应设置（公开接口不能区分未询问和已拒绝）。
+- 自动化先只读查询 System Events 的状态：尚未询问时在后台线程调用 `AEDeterminePermissionToAutomateTarget(..., true)` 请求授权；已拒绝时打开自动化设置。首次拒绝后不自动跳设置，用户可再次点击进入。其他目标应用的自动化授权由系统分别管理。
+- 打包的 `Info.plist` 提供 Apple Events 用途说明，签名包含自动化 entitlement；授权仍取决于系统确认和当前签名身份。
 - 非 macOS 只显示一句「仅 macOS 可用」，不摆假读数。
 
 ## 存储维护

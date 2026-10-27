@@ -455,7 +455,7 @@ export type SystemPermissions = {
  automation: boolean;
 };
 
-/** 授权类型 → 系统设置里对应的面板（`open_system_permission` 的参数）。 */
+/** 系统授权类型（`open_system_permission` 的参数）。 */
 export type SystemPermissionKind = "disk" | "accessibility" | "screenCapture" | "automation";
 
 // ---------- 存储维护（2026-10-22）：omp 侧占用读数 / 清理 ----------

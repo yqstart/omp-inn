@@ -1,4 +1,4 @@
-//! 设置 ›「系统授权」：检测 macOS TCC 授权并跳到对应系统设置面板。
+//! 设置 ›「系统授权」：检测和请求 macOS TCC 授权，必要时跳到对应设置面板。
 //!
 //! 为什么需要它：computer use（omp 的截图 / AX 操作）走的是**本进程**的 TCC 归因——
 //! omp 是壳 spawn 的子进程，责任进程（responsible process）就是 omp-inn 自己。
@@ -41,10 +41,12 @@ pub fn get_system_permissions() -> SystemPermissions {
     platform::detect()
 }
 
-/// 打开系统设置里对应的授权面板（`kind` = `disk` / `accessibility` / `screenCapture` / `automation`）。
+/// 请求系统授权，或在需要手动操作时打开对应设置面板。
 #[tauri::command]
-pub fn open_system_permission(kind: String) -> Result<(), String> {
-    platform::open(&kind)
+pub async fn open_system_permission(kind: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || platform::open(&kind))
+        .await
+        .map_err(|e| format!("请求系统授权失败：{e}"))?
 }
 
 /// 授权类型 → 系统设置锚点（纯映射，单测覆盖；未知类型不猜）。
@@ -63,6 +65,7 @@ mod platform {
     use super::{settings_anchor, SystemPermissions};
     use std::ffi::c_void;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
     use std::time::Instant;
 
@@ -70,15 +73,32 @@ mod platform {
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
         fn AXIsProcessTrusted() -> u8;
+        fn AXIsProcessTrustedWithOptions(options: *const c_void) -> u8;
+        static kAXTrustedCheckOptionPrompt: *const c_void;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFBooleanTrue: *const c_void;
+        fn CFDictionaryCreate(
+            allocator: *const c_void,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            count: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> *const c_void;
+        fn CFRelease(value: *const c_void);
     }
 
     // CoreGraphics: bool CGPreflightScreenCaptureAccess(void)（10.15+，显式查询不弹窗）
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
     }
 
-    // Carbon / AE：自动化授权查询（只读，不触发系统确认框）
+    // Carbon / AE：自动化授权查询与请求
     #[repr(C)]
     struct AEDesc {
         descriptor_type: u32,
@@ -91,6 +111,8 @@ mod platform {
 
     // `AEDeterminePermissionToAutomateTarget` 的返回码（其余非 0 值一律按未授权）。
     const NO_ERR: i32 = 0;
+    const NOT_PERMITTED: i32 = -1743;
+    const WOULD_REQUIRE_CONSENT: i32 = -1744;
     pub(super) const PROC_NOT_FOUND: i32 = -600; // 目标进程没在运行，与授权无关
 
     #[link(name = "CoreServices", kind = "framework")]
@@ -122,6 +144,16 @@ mod platform {
     }
 
     pub fn open(kind: &str) -> Result<(), String> {
+        match kind {
+            "disk" => open_disk_access(),
+            "accessibility" => request_accessibility(),
+            "screenCapture" => request_screen_capture(),
+            "automation" => request_automation(),
+            _ => Err(format!("未知的授权类型：{kind}")),
+        }
+    }
+
+    fn open_settings(kind: &str) -> Result<(), String> {
         let anchor = settings_anchor(kind).ok_or_else(|| format!("未知的授权类型：{kind}"))?;
         let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
         // 不等待：`open` 只把 URL 交给 LaunchServices，系统设置窗口的启动与本命令无关。
@@ -130,6 +162,92 @@ mod platform {
             .spawn()
             .map(|_| ())
             .map_err(|e| format!("打开系统设置失败：{e}"))
+    }
+
+    fn open_disk_access() -> Result<(), String> {
+        // 开发模式可能没有应用包；不猜测其他安装位置，仍打开系统设置。
+        let app = std::env::current_exe().ok().and_then(|exe| {
+            exe.ancestors()
+                .find(|path| path.extension().is_some_and(|ext| ext == "app"))
+                .map(|path| path.to_path_buf())
+        });
+        let reveal = if let Some(app) = app {
+            std::process::Command::new("open")
+                .arg("-R")
+                .arg(app)
+                .status()
+                .map_err(|e| format!("在访达中显示应用失败：{e}"))
+                .and_then(|status| {
+                    if status.success() { Ok(()) } else { Err(format!("在访达中显示应用失败：{status}")) }
+                })
+        } else {
+            Ok(())
+        };
+        // 即使访达定位失败，也让用户能手动在系统设置中添加应用。
+        open_settings("disk")?;
+        reveal
+    }
+
+    fn request_accessibility() -> Result<(), String> {
+        // 辅助功能提示由系统异步显示，无法从返回值区分尚未询问和已拒绝。
+        // 首次点击请求提示；仍未授权时再次点击打开设置，确保可恢复。
+        static REQUESTED: AtomicBool = AtomicBool::new(false);
+        if REQUESTED.swap(true, Ordering::Relaxed) {
+            return open_settings("accessibility");
+        }
+        // SAFETY: 字典仅在本调用期间持有系统常量，调用后释放。
+        unsafe {
+            let keys = [kAXTrustedCheckOptionPrompt];
+            let values = [kCFBooleanTrue];
+            let options = CFDictionaryCreate(
+                std::ptr::null(), keys.as_ptr(), values.as_ptr(), 1,
+                std::ptr::null(), std::ptr::null(),
+            );
+            if options.is_null() {
+                REQUESTED.store(false, Ordering::Relaxed);
+                return Err("创建辅助功能授权请求失败".into());
+            }
+            AXIsProcessTrustedWithOptions(options);
+            CFRelease(options);
+        }
+        Ok(())
+    }
+
+    fn request_screen_capture() -> Result<(), String> {
+        // 系统 API 不区分尚未询问和已拒绝。首次请求后由用户决定，
+        // 下次点击则进入设置；已拒绝的应用不会再收到系统提示。
+        static REQUESTED: AtomicBool = AtomicBool::new(false);
+        if REQUESTED.swap(true, Ordering::Relaxed) {
+            return open_settings("screenCapture");
+        }
+        // SAFETY: 系统 API 无参数，授权结果由正常轮询回读。
+        unsafe {
+            CGRequestScreenCaptureAccess();
+        }
+        Ok(())
+    }
+
+    fn request_automation() -> Result<(), String> {
+        let mut status = query_automation();
+        if status == PROC_NOT_FOUND {
+            launch_system_events()?;
+            for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                status = query_automation();
+                if status != PROC_NOT_FOUND {
+                    break;
+                }
+            }
+        }
+        match status {
+            NO_ERR => Ok(()),
+            NOT_PERMITTED => open_settings("automation"),
+            WOULD_REQUIRE_CONSENT => match determine_automation(true) {
+                NO_ERR | NOT_PERMITTED => Ok(()),
+                code => Err(format!("请求自动化授权失败（系统错误码：{code}）")),
+            },
+            code => Err(format!("检查自动化授权失败（系统错误码：{code}）")),
+        }
     }
 
     /// 完全磁盘访问没有公开 API：受 TCC 保护的文件能读 = 已授权。
@@ -173,7 +291,7 @@ mod platform {
         if last_failure.is_some_and(|at| at.elapsed().as_secs() < 30) {
             return false;
         }
-        launch_system_events();
+        let _ = launch_system_events();
         // `open` 返回时通常已能解析到进程；没赶上就短暂等待（最多 250ms）——
         // 等的是「进程出现」，-1743 / -1744 这类授权结论等待也不会变。
         for attempt in 0..6 {
@@ -199,6 +317,10 @@ mod platform {
 
     /// 查一次授权状态（纯查询：不发 Apple Event、不弹系统确认框）。
     pub(super) fn query_automation() -> i32 {
+        determine_automation(false)
+    }
+
+    fn determine_automation(ask_user: bool) -> i32 {
         const BUNDLE: &[u8] = b"com.apple.systemevents";
         let mut target = AEDesc { descriptor_type: 0, data_handle: std::ptr::null_mut() };
         // SAFETY: 只读传入 bundle id 字节，desc 由 AECreateDesc 填充、随后由本函数释放。
@@ -215,7 +337,7 @@ mod platform {
         }
         // SAFETY: target 是上面创建的有效 AEDesc。
         let status = unsafe {
-            AEDeterminePermissionToAutomateTarget(&target, CORE_SUITE, GET_DATA, 0)
+            AEDeterminePermissionToAutomateTarget(&target, CORE_SUITE, GET_DATA, u8::from(ask_user))
         };
         // SAFETY: 与 AECreateDesc 配对释放；失败也必须在同一条路径上释放。
         unsafe {
@@ -228,12 +350,18 @@ mod platform {
     /// 启动 app 不涉及 Apple Event，不会触发授权框。
     ///
     /// 只在 `-600`（目标没在跑）时调用；重复调用的闸门在 `recover_by_launching`。
-    fn launch_system_events() {
+    fn launch_system_events() -> Result<(), String> {
         // `-g` 不把任何窗口提到前台；`open` 返回时 LaunchServices 已登记进程，
         // 紧接着的查询就能解析到它（实测无需额外等待）。
-        let _ = std::process::Command::new("open")
+        let status = std::process::Command::new("open")
             .args(["-g", "-b", "com.apple.systemevents"])
-            .status();
+            .status()
+            .map_err(|e| format!("启动系统事件失败：{e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("启动系统事件失败：{status}"))
+        }
     }
 }
 

@@ -376,7 +376,7 @@ export const api = {
   * 纯本地查询，可随面板轮询。非 macOS 回 `supported: false`。
   */
  getSystemPermissions: () => call<SystemPermissions>(IPC.getSystemPermissions),
- /** 打开系统设置里对应的授权面板（`disk` / `accessibility` / `screenCapture` / `automation`）。 */
+ /** 请求对应系统授权；完全磁盘访问及已有拒绝记录的情况引导至系统设置。 */
  openSystemPermission: (kind: SystemPermissionKind) => call<void>(IPC.openSystemPermission, { kind }),
  /**
   * omp 约束（设置 ›「omp 约束」）：全局上下文约束 `AGENTS.md`、sticky 硬规则 `RULES.md`

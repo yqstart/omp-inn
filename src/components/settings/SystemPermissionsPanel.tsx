@@ -14,7 +14,7 @@ const ROW_ICONS = {
 } as const;
 
 /**
- * 设置 ›「系统授权」：macOS 四项 TCC 授权的**实际生效状态** + 一键跳到系统设置。
+ * 设置 ›「系统授权」：macOS 四项 TCC 授权的**实际生效状态**与授权入口。
  *
  * 为什么要有这一页：系统设置里那个开关不等于真的生效——ad-hoc 签名 / 证书轮换会让 TCC
  * 库里的记录与当前签名身份对不上，条目在、开关开着，`AXIsProcessTrusted()` 与
@@ -28,8 +28,9 @@ const ROW_ICONS = {
 export function SystemPermissionsPanel() {
  const t = useText();
  const [state, setState] = useState<SystemPermissions | null>(null);
- const [error, setError] = useState<string | null>(null);
- /** 正在跳转的授权类型（按钮在系统设置起来之前不接第二次点击）。 */
+ const [readError, setReadError] = useState<string | null>(null);
+ const [actionError, setActionError] = useState<string | null>(null);
+ /** 正在请求的授权类型（操作完成之前不接第二次点击）。 */
  const [opening, setOpening] = useState<SystemPermissionKind | null>(null);
  /** 单飞：2 秒一拍不许叠请求（上一次还没回来就跳过这一拍）。 */
  const inFlight = useRef(false);
@@ -39,13 +40,13 @@ export function SystemPermissionsPanel() {
   inFlight.current = true;
   try {
    setState(await api.getSystemPermissions());
-   setError(null);
+   setReadError(null);
   } catch (e: unknown) {
-   setError(e instanceof Error ? e.message : String(e));
+   setReadError(fmt(t.systemPermCheckFailed, e instanceof Error ? e.message : String(e)));
   } finally {
    inFlight.current = false;
   }
- }, []);
+ }, [t.systemPermCheckFailed]);
 
  useEffect(() => {
   // 首读放进定时器回调：effect 体内直接 `void load()` 会被
@@ -62,11 +63,11 @@ export function SystemPermissionsPanel() {
 
  const open = async (kind: SystemPermissionKind) => {
   setOpening(kind);
-  setError(null);
+  setActionError(null);
   try {
    await api.openSystemPermission(kind);
   } catch (e: unknown) {
-   setError(fmt(t.systemPermOpenFailed, e instanceof Error ? e.message : String(e)));
+   setActionError(fmt(t.systemPermOpenFailed, e instanceof Error ? e.message : String(e)));
   } finally {
    setOpening(null);
   }
@@ -114,16 +115,20 @@ export function SystemPermissionsPanel() {
     </button>
    </div>
 
-   {error && (
+   {[
+    { kind: "read", message: readError },
+    { kind: "action", message: actionError },
+   ].map(({ kind, message }) => message && (
     <div
+     key={kind}
      role="alert"
      className="mt-4 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[13px] text-danger"
     >
-     {fmt(t.systemPermCheckFailed, error)}
+     {message}
     </div>
-   )}
+   ))}
 
-   {state === null && !error && (
+   {state === null && !readError && (
     <p className="mt-6 flex items-center gap-2 text-[13px] text-faint">
      <Loader size={14} className="animate-spin" aria-hidden />
      {t.systemPermLoading}

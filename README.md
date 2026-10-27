@@ -54,7 +54,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ```bash
 pnpm tauri:build      # 本机发布构建（产物见 src-tauri/target/release/bundle/）
-pnpm icon             # 从 design-system/icon/omp-inn-icon.svg 重生成应用图标
+pnpm icon             # 从 design-system/icon/omp-inn-icon.svg 重生成桌面及手机端图标
 pnpm file-icons       # 从 material-icon-theme 重新生成右栏文件树的图标子集
 ```
 
