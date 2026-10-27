@@ -29,6 +29,8 @@ export const api = {
  refreshModels: () => call<ModelCatalog>(IPC.refreshModels),
  getOverlay: () => call<Overlay>(IPC.getOverlay),
  listProjects: () => call<ProjectView[]>(IPC.listProjects),
+ /** 轻量对账：外部改名后按目录身份链找回项目路径；返回路径是否有变化。 */
+ reconcileProjects: () => call<boolean>(IPC.reconcileProjects),
  addProject: (path: string) => call<ProjectView>(IPC.addProject, { path }),
  removeProject: (id: string) => call<void>(IPC.removeProject, { id }),
  relocateProject: (id: string, path: string) =>

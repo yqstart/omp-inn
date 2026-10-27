@@ -24,6 +24,16 @@
   - 前端 `openSessionWithHistory` 全程用 `opened.id`（激活 / 历史 / 导航栈 / 发消息），漂移时补一条说明分隔行。
   - 不许用请求 id 继续——会错位到原会话并反复拉起新进程。
 
+## 项目路径与外部改名
+
+项目的显示名没有独立字段，**真相 = 覆盖层 `projects[].path` 的末段目录名**。用户在 Finder / 终端 / 其他应用里重命名项目目录（或它的任一上级目录）后，旧路径失效；壳侧按目录身份链把项目找回来（`src-tauri/src/project_paths.rs`）。
+
+- **身份链**：新增项目 / 每次读到存在的路径时，从挂载根到项目目录逐级记录 `Project.path_ids`（Unix `dev:ino`，Windows 卷序列号 + 文件索引）。只存本地覆盖层，不参与展示。
+- **找回**：某项目路径失联时，从根目录开始逐级扫描当前目录的直接子项，按身份匹配下一级——名字改了也能跟着走；不按名字猜（同名新目录不会误认领），目标路径已被其他项目占用时不动。
+- **触发点**：`list_projects` / `list_checkouts` / `list_sessions` 读取前都会先对账（保证名字、worktree、会话归属都用新路径）；前端在窗口重新获得焦点 / 转回可见时重拉侧栏，可见时每 10s 调一次轻量 `reconcile_projects`（只 stat 路径，失联才扫描身份链）。
+- **边界**：只跟随改名（项目目录本身或上级目录改名）。把项目移出原父目录、跨卷改名、或老覆盖层没有身份链时都保持「目录缺失」，继续手动重定位；不许按名字猜。**壳侧绝不改写会话 jsonl 的 `cwd`**：旧会话仍指向旧目录，归属与 `--resume` 由 omp 决定，壳不代偿。
+- 写盘：对账只在身份链 / 路径真正变化时原子写覆盖层；写失败回滚内存快照，避免「界面已换新路径、重启又变回去」。
+
 ## 新建会话
 
 `create_session` 的启动参数与失败降级。
@@ -158,7 +168,7 @@ src-tauri/src/
   proc.rs                    # 进程与环境工具（登录 shell PATH 探测 / 进程组强杀）
   wsl.rs                     # WSL UNC 识别 + wsl.exe 终端启动（不跨发行版驱动 omp）
   commands/mod.rs            # RPC 命令面 + 项目 / 工作区 / 会话 / git 命令
-  context.rs session_scan.rs overlay.rs git_info.rs git_commit.rs git_ops.rs git_graph.rs project_files.rs workspace_fs.rs project_scripts.rs
+  context.rs session_scan.rs overlay.rs project_paths.rs git_info.rs git_commit.rs git_ops.rs git_graph.rs project_files.rs workspace_fs.rs project_scripts.rs
   plugins.rs skills.rs settings.rs system_permissions.rs models_config.rs constraints.rs title_prompt.rs omp_update.rs commit_msg.rs
   providers.rs memories.rs usage.rs provider_usage.rs extra_usage.rs provider_models.rs live_stats.rs
 scripts/                     # e2e-ipc-selfcheck / generate-icons / generate-material-icons / changelog-notes / fixup-latest-json / make-signing-cert / tauri-build

@@ -188,6 +188,13 @@ function SessionRow({
 export function ChatSidebar() {
  const t = useText();
  const projects = useApp((s) => s.projects);
+ /**
+  * 项目路径签名：外部改名后后端会把 `path` 换成新路径，签名变化 → 会话列表必须重扫，
+  * 否则扫描行里的 `projectId` 还是旧路径算出来的（新目录里的会话会被当成未归属）。
+  * 排序后再比，拖拽排序 / 工作区归属变化不触发无谓重扫。
+  */
+ const projectStamp = useMemo(() => projects.map((p) => `${p.id}\0${p.path}`).sort().join("\n"), [projects]);
+ const syncedProjectStamp = useRef<string | null>(null);
  const workspaceGroups = useApp((s) => s.workspaceGroups);
  const activeSessionId = useApp((s) => s.activeSessionId);
  // 已打开会话的实时视图（标题真相）：改名 / 首条回退 / title_change 实时帧只写 store，
@@ -284,6 +291,18 @@ export function ChatSidebar() {
   }
   void reload();
  }, [reload]);
+
+ // 项目路径变化（外部改名同步 / 重定位 / 增删）后重扫一次：会话归属按路径现算，
+ // 不重扫就会拿着旧路径归出来的 projectId 继续渲染。首次挂载由上面的冷启动负责，这里跳过。
+ useEffect(() => {
+  if (syncedProjectStamp.current === null) {
+   syncedProjectStamp.current = projectStamp;
+   return;
+  }
+  if (syncedProjectStamp.current === projectStamp) return;
+  syncedProjectStamp.current = projectStamp;
+  void reload();
+ }, [projectStamp, reload]);
 
  // 会话切换（新建 / 打开 / 改名回读）后防抖补一次：新会话与 running 标记靠这一趟进列表。
  const prevSid = useRef(activeSessionId);

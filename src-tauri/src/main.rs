@@ -16,6 +16,7 @@ mod overlay;
 mod plugins;
 mod proc;
 mod project_files;
+mod project_paths;
 mod project_scripts;
 mod provider_models;
 mod provider_usage;
@@ -77,6 +78,7 @@ fn main() {
             get_models,
             refresh_models,
             list_projects,
+            reconcile_projects,
             add_project,
             remove_project,
             relocate_project,

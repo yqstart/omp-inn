@@ -63,6 +63,7 @@ scripts/               # e2e-ipc-selfcheck / 图标生成 / changelog-notes / fi
 
 ### 数据与持久化
 
+- **项目名 = 覆盖层路径末段**；外部改名（项目目录或任一上级目录改名）靠 `Project.path_ids` 的目录身份链跟随（`list_projects` / `list_checkouts` / `list_sessions` 读取前对账，前端切回前台 / 可见时兜底对账）。改变父目录的移动 / 老覆盖层无身份链 / 跨卷改名都找不回：保持「目录缺失」，不许按名字猜；**绝不改写会话 jsonl 的 `cwd`**，旧会话仍指向旧目录。
 - 图片：jsonl / 历史里的 `blob:sha256:<hash>` **绝不许**当 base64 拼 `data:` URL；`blobRefOf` 只认 64 位小写 hex。
 - 使用统计去重只认 `usage.rs` 的 `usage_key`（`sid|responseId`，缺失时 `sid|时间戳|用量`）；两路都有时以 jsonl 为准，不许加时间窗口 / 文件存在性判据。
 - 设置写入口径：omp 侧只经 CLI；**直接写文件的只有两处**——`models.yml` 与 omp 约束文件（`AGENTS.md` / `RULES.md` / `rules/*.md`），都必须 hash 乐观锁 + 备份 + 原子写。

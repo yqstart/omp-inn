@@ -19,7 +19,7 @@ import { OmpUpdateDialog } from "../components/update/OmpUpdateDialog";
 import { OmpInstallDialog } from "../components/update/OmpInstallDialog";
 import { ProviderUsageDialog } from "../components/usage/ProviderUsageDialog";
 import { hasWorkspaceRefs } from "../lib/workspaceFiles";
-import { newChatInDefaultCheckout } from "../lib/checkouts";
+import { newChatInDefaultCheckout, refreshSidebar } from "../lib/checkouts";
 import { openSessionWithHistory } from "../lib/sessionOpen";
 import { loadLastSession, saveLastSession } from "../lib/lastSession";
 import { refreshWorkspaceGitState, startWorkspaceGitPolling } from "../lib/commitTasks";
@@ -144,6 +144,64 @@ function useWorkspaceGitRefresh() {
 
  // 兜底轮询：会话里的 git 活动（agent 或手敲）不改变任何前端状态，等不到「转就绪」那个时机
  useEffect(() => startWorkspaceGitPolling(), []);
+}
+
+/**
+ * 外部项目改名同步（2026-10-27 用户口径）。
+ *
+ * 项目名来自覆盖层路径的末段目录名，外部（Finder / 终端 / 其他应用）改名后旧路径失效，
+ * 只靠左栏挂载那一次冷启动永远看不到新名字。后端按目录身份链找回路径（`reconcile_projects`），
+ * 这里负责把「什么时候对账」定下来：
+ *
+ * - 窗口重新获得焦点 / 从后台转回可见：立即重拉项目 + 目录行 + 工作区清单（外部改动没有事件）；
+ * - 可见时每 10s 兜底对账一次：只 stat 路径，失联才扫描身份链；发现路径变化再重拉。
+ *   这样在应用内终端改名、或后台脚本改名也能在 10s 内反映出来；
+ * - 重拉做 1.5s 去抖，避免 alt-tab 连击放大 `git worktree list` 的开销；对账发现变化时
+ *   强制重拉（不能被刚发生过的 focus 刷新吞掉，否则这次变化要等到下一次改名才会显示）。
+ */
+function useExternalProjectSync() {
+ useEffect(() => {
+  let inFlight = false;
+  let pending = false;
+  let last = 0;
+  const pull = (force = false) => {
+   if (document.hidden) return;
+   if (inFlight) {
+    if (force) pending = true;
+    return;
+   }
+   const now = Date.now();
+   if (!force && now - last < 1500) return;
+   last = now;
+   inFlight = true;
+   void refreshSidebar()
+    .catch(() => undefined)
+    .finally(() => {
+     inFlight = false;
+     if (pending) {
+      pending = false;
+      pull(true);
+     }
+    });
+  };
+  const onVisible = () => pull();
+  document.addEventListener("visibilitychange", onVisible);
+  window.addEventListener("focus", onVisible);
+  const timer = window.setInterval(() => {
+   if (document.hidden) return;
+   void api
+    .reconcileProjects()
+    .then((changed) => {
+     if (changed) pull(true);
+    })
+    .catch(() => undefined);
+  }, 10_000);
+  return () => {
+   document.removeEventListener("visibilitychange", onVisible);
+   window.removeEventListener("focus", onVisible);
+   window.clearInterval(timer);
+  };
+ }, []);
 }
 
 /**
@@ -337,6 +395,7 @@ export function App() {
  useLocale();
  useHotkeys();
  useWorkspaceGitRefresh();
+ useExternalProjectSync();
  useTitlePromptSync();
  useLastSessionRestore();
 

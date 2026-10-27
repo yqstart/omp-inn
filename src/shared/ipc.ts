@@ -6,6 +6,7 @@ export const IPC = {
  refreshModels: "refresh_models",
  getOverlay: "get_overlay",
  listProjects: "list_projects",
+ reconcileProjects: "reconcile_projects",
  addProject: "add_project",
  removeProject: "remove_project",
  relocateProject: "relocate_project",

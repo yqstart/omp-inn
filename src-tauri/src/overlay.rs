@@ -15,6 +15,10 @@ pub struct Project {
     /// 所属工作区（V21 多项目容器）；None = 未分组（不参与任何工作区协作）。
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// 从挂载根到项目目录的逐级目录身份（`dev:ino` / 卷序列号+文件索引）。
+    /// 只用于外部改名 / 移动后把项目路径找回来，不参与展示；老覆盖层为空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_ids: Vec<String>,
 }
 
 /// 工作区（V21）：多项目容器。

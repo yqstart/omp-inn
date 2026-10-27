@@ -68,18 +68,41 @@ pub fn cmd_err(code: &str, message: String, hint: Option<String>) -> CmdError {
     CmdError { ok: false, code: code.into(), message, hint }
 }
 
-pub(crate) fn save_overlay(state: &AppState) -> Result<(), String> {
-    let text = {
-        let ov = state.overlay.try_lock().map_err(|_| "overlay 忙，请重试".to_string())?;
-        serde_json::to_string_pretty(&*ov).map_err(|e| e.to_string())?
-    };
-    if let Some(parent) = state.overlay_path.parent() {
+/// 覆盖层原子写（临时文件 + rename）。调用方负责保证 `ov` 是当前内存快照。
+pub(crate) fn write_overlay_file(path: &Path, ov: &Overlay) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(ov).map_err(|e| e.to_string())?;
+    if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let tmp = state.overlay_path.with_extension("tmp");
+    let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &state.overlay_path).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+pub(crate) fn save_overlay(state: &AppState) -> Result<(), String> {
+    let ov = state.overlay.try_lock().map_err(|_| "overlay 忙，请重试".to_string())?;
+    write_overlay_file(&state.overlay_path, &ov)
+}
+
+/// 项目路径跟随外部改名：把覆盖层里失联的项目按目录身份链找回，并刷新身份链。
+///
+/// 只在真正有变化时写盘；返回**项目路径是否变了**（身份链首次补齐不算）。
+/// 写盘失败回滚内存快照，避免「界面已换新路径、重启又变回去」。
+pub(crate) async fn sync_project_paths(state: &AppState) -> bool {
+    let mut ov = state.overlay.lock().await;
+    let original = ov.clone();
+    let before: Vec<String> = ov.projects.iter().map(|p| p.path.clone()).collect();
+    let dirty = crate::project_paths::sync_project_paths(&mut ov);
+    let paths_changed = ov.projects.iter().map(|p| p.path.clone()).collect::<Vec<_>>() != before;
+    if dirty {
+        if let Err(e) = write_overlay_file(&state.overlay_path, &ov) {
+            eprintln!("[project-paths] 覆盖层写盘失败：{e}");
+            *ov = original;
+            return false;
+        }
+    }
+    paths_changed
 }
 
 fn load_overlay(path: &std::path::Path) -> (Overlay, bool) {
@@ -463,10 +486,15 @@ pub struct ProjectView {
     pub workspace_id: Option<String>,
 }
 
-fn project_views(state: &State<AppState>) -> Vec<ProjectView> {
-    let (projects, sessions_root) = match (state.overlay.try_lock(), state.agent_dir.try_lock()) {
-        (Ok(ov), Ok(agent)) => (ov.projects.clone(), agent.join("sessions")),
-        _ => return vec![],
+/// 项目视图：**等锁**而不是 try_lock 返回空。挂载时 `list_projects` / `list_checkouts` /
+/// `list_sessions` 并发进来，每个入口都会先做一次外部改名对账（持有 overlay 锁写盘）；
+/// 老实现 try_lock 失败就返回空列表，前端会把「项目还在」误判成全部消失。
+/// 计数扫描在锁外做，避免长时间占着覆盖层。
+async fn project_views(state: &State<'_, AppState>) -> Vec<ProjectView> {
+    let (projects, sessions_root) = {
+        let ov = state.overlay.lock().await;
+        let sessions_root = state.agent_dir.lock().await.join("sessions");
+        (ov.projects.clone(), sessions_root)
     };
     projects
         .iter()
@@ -524,7 +552,16 @@ fn read_head_text(p: &std::path::Path, limit: usize) -> std::io::Result<String> 
 
 #[tauri::command]
 pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectView>, CmdError> {
-    Ok(project_views(&state))
+    // 外部改名 / 移动后，先把失联项目的路径找回来，再按新路径派生名字与会话数。
+    sync_project_paths(&state).await;
+    Ok(project_views(&state).await)
+}
+
+/// 轻量对账入口（前端可见时轮询）：只 stat 项目路径 / 必要时按身份链找回，
+/// 不扫会话、不跑 git；返回项目路径是否有变化，由前端决定是否重拉侧栏。
+#[tauri::command]
+pub async fn reconcile_projects(state: State<'_, AppState>) -> Result<bool, CmdError> {
+    Ok(sync_project_paths(&state).await)
 }
 
 #[tauri::command]
@@ -545,13 +582,14 @@ pub async fn add_project(state: State<'_, AppState>, path: String) -> Result<Pro
         if let Some(exist) = ov.projects.iter().find(|p| normalize_path(&p.path) == norm) {
             let id = exist.id.clone();
             drop(ov);
-            return project_views(&state).into_iter().find(|v| v.id == id).ok_or(cmd_err("INTERNAL", "项目状态不一致".into(), None));
+            return project_views(&state).await.into_iter().find(|v| v.id == id).ok_or(cmd_err("INTERNAL", "项目状态不一致".into(), None));
         }
         let id = format!("p{}", chrono::Utc::now().timestamp_millis());
-        ov.projects.push(Project { id: id.clone(), path: norm.clone(), added_at: chrono::Utc::now().timestamp_millis(), last_model: None, last_thinking: None, workspace_id: None });
+        let path_ids = crate::project_paths::path_chain(std::path::Path::new(&norm)).unwrap_or_default();
+        ov.projects.push(Project { id: id.clone(), path: norm.clone(), added_at: chrono::Utc::now().timestamp_millis(), last_model: None, last_thinking: None, workspace_id: None, path_ids });
     }
     save_overlay(&state).map_err(|e| cmd_err("OVERLAY_WRITE", e, None))?;
-    project_views(&state).into_iter().find(|v| v.path == norm).ok_or(cmd_err("INTERNAL", "项目状态不一致".into(), None))
+    project_views(&state).await.into_iter().find(|v| v.path == norm).ok_or(cmd_err("INTERNAL", "项目状态不一致".into(), None))
 }
 
 #[tauri::command]
@@ -615,9 +653,10 @@ pub async fn relocate_project(state: State<'_, AppState>, id: String, path: Stri
             return Err(cmd_err("NOT_FOUND", "项目不存在".into(), None));
         };
         p.path = norm;
+        p.path_ids = crate::project_paths::path_chain(std::path::Path::new(&p.path)).unwrap_or_default();
     }
     save_overlay(&state).map_err(|e| cmd_err("OVERLAY_WRITE", e, None))?;
-    project_views(&state).into_iter().find(|v| v.id == id).ok_or(cmd_err("INTERNAL", "项目状态不一致".into(), None))
+    project_views(&state).await.into_iter().find(|v| v.id == id).ok_or(cmd_err("INTERNAL", "项目状态不一致".into(), None))
 }
 
 // ---------- 目录行（V21：项目主目录 + git worktree；原「工作区行」） ----------
@@ -660,6 +699,8 @@ fn project_display_name(path: &str) -> String {
 /// 而不是 `omp worktree list`（只登记 `~/.omp/wt` 下的）。
 #[tauri::command]
 pub async fn list_checkouts(state: State<'_, AppState>) -> Result<Vec<CheckoutView>, CmdError> {
+    // 先跟随外部改名：目录行 / git worktree 查询都必须用新路径。
+    sync_project_paths(&state).await;
     let projects: Vec<(String, String, String)> = {
         let ov = state.overlay.lock().await;
         ov.projects.iter().map(|p| (p.id.clone(), p.path.clone(), project_display_name(&p.path))).collect()
@@ -860,7 +901,7 @@ pub async fn move_project(
         ov.projects = projects;
     }
     save_overlay(&state).map_err(|e| cmd_err("OVERLAY_WRITE", e, None))?;
-    Ok(project_views(&state))
+    Ok(project_views(&state).await)
 }
 
 /// 按 `order` 重排项目：认得的 id 按序在前，缺席的按原相对顺序补末尾（防御脏输入，不丢项目）。
@@ -1001,6 +1042,8 @@ pub async fn list_sessions(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<SessionPage, CmdError> {
+    // 外部改名后先更新项目路径，再按新路径计算会话归属（否则列表把新目录里的会话算成未归属）。
+    sync_project_paths(&state).await;
     // 列表「运行中」快照从进程表的活动态生成（唯一真值；见 running_snapshot）。
     // 先取快照再锁 overlay：与 fork 路径（runtime → overlay）保持同一把锁顺序。
     let running = running_snapshot(&state).await;
