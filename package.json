@@ -1,7 +1,7 @@
 {
   "name": "omp-inn",
   "version": "0.1.0",
-  "description": "oh-my-pi 聊天工作台（Tauri v2 + React）",
+  "description": "oh-my-pi（omp）桌面端聊天工作台（Tauri v2 + React）",
   "license": "MIT",
   "repository": {
     "type": "git",
