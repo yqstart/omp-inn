@@ -40,6 +40,16 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 前置条件见 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)；开发环境、检查与提交约定见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，工程导航见 [`AGENTS.md`](AGENTS.md)。
 
+## 安装
+
+从 [Releases](https://github.com/yqstart/omp-inn/releases) 下载对应平台的安装包：
+
+- **macOS**：`.dmg`（Apple Silicon 与 Intel 各自独立）。应用使用本机自签名证书、未经 Apple 公证，首次打开会被 Gatekeeper 拦下：到「系统设置 > 隐私与安全性」点「仍要打开」；若提示「已损坏」，执行 `xattr -dr com.apple.quarantine /Applications/omp-inn.app` 后再打开。
+- **Windows**：`.exe`（NSIS）或 `.msi`。未做代码签名，SmartScreen 提示时选择「仍要运行」。
+- **Linux**：`.AppImage` / `.deb` / `.rpm`，需要 WebKitGTK 4.1。
+
+运行前需要 `omp` 18.x：应用内提供安装入口，也可以执行 `curl -fsSL https://omp.sh/install | sh`。
+
 ## 构建
 
 ```bash
