@@ -185,3 +185,13 @@ jobs:
           gh release download "$TAG" --pattern latest.json --dir "$RUNNER_TEMP/updater" --clobber
           node scripts/fixup-latest-json.mjs "$RUNNER_TEMP/updater/latest.json" "$TAG"
           gh release upload "$TAG" "$RUNNER_TEMP/updater/latest.json" --clobber
+
+      # tauri-action 的 releaseBody 在多平台矩阵里没有落到 Release 页面（实测首版为空）；
+      # latest.json 的 notes 由上面的 fixup 回填，这里把同一份 CHANGELOG 版本节补到 Release 正文。
+      - name: 回填 Release 说明（CHANGELOG 版本节）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v$(node -p "require('./package.json').version")"
+          node scripts/changelog-notes.mjs > "$RUNNER_TEMP/release-notes.md"
+          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
