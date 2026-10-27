@@ -20,7 +20,7 @@ oh-my-pi（`omp`）的桌面端：**聊天形态的 omp 工作台**（Tauri v2 +
 
 ## 技术基线
 
-- 壳：Tauri v2（`src-tauri/`，identifier `com.ompinn.app`）。自绘标题栏用 `data-tauri-drag-region` + `core:window:allow-start-dragging`；**要整条可拖就写 `="deep"`**（裸属性只认直接命中该元素的 mousedown；clickable 元素由拖拽脚本自动短路）。macOS 产物走自签名证书（`scripts/`）；Windows 保留系统标题栏、不做红绿灯留白。
+- 壳：Tauri v2（`src-tauri/`，identifier `com.ompinn.desktop`）。自绘标题栏用 `data-tauri-drag-region` + `core:window:allow-start-dragging`；**要整条可拖就写 `="deep"`**（裸属性只认直接命中该元素的 mousedown；clickable 元素由拖拽脚本自动短路）。macOS 产物走自签名证书（`scripts/`）；Windows 保留系统标题栏、不做红绿灯留白。
 - 前端：React 19 + Vite + Tailwind v4 + Zustand。
 - 后端：Rust + tokio + serde；`reqwest`（供应商用量补充探针）。
 - 工具链：Node 22 + pnpm 11；Rust stable。上游运行时：`omp` 18.x（不随仓库分发）。
