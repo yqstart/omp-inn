@@ -3,8 +3,8 @@ import { ImagePlus, Send, Stop, X } from "reicon-react";
 import { api } from "@shared/api";
 import type { ImageAttachment } from "@shared/types";
 import { ATTACH_MAX_BYTES } from "../lib/attachments";
-import { withImageOrderNote } from "../lib/imageRefs";
-import { refreshTitleAfterFirstSend } from "../lib/sessionOpen";
+import { restoreImageOrder, withImageOrderNote } from "../lib/imageRefs";
+import { prepareSessionForSend, refreshTitleAfterFirstSend } from "../lib/sessionOpen";
 import { useText } from "../lib/useText";
 import { useApp } from "../stores/app";
 
@@ -76,6 +76,7 @@ export function MobileComposer({
  const state = useApp((s) => s.statusBySession[sid]?.state);
  const queued = useApp((s) => s.queuedBySession[sid]);
  const [busy, setBusy] = useState(false);
+ const busyRef = useRef(false);
  const [error, setError] = useState<string | null>(null);
  const [showConfirmStop, setShowConfirmStop] = useState(false);
  const ta = useRef<HTMLTextAreaElement>(null);
@@ -95,36 +96,60 @@ export function MobileComposer({
  };
 
  const send = async (kind: "send" | "steer" | "queue") => {
-  if (busy) return;
+  if (busyRef.current) return;
   const text = draft.trim();
   if (!text && attachments.length === 0) {
    setError(t.mobileNoMessage);
    return;
   }
+  busyRef.current = true;
   setBusy(true);
   setError(null);
+  const initial = useApp.getState();
+  initial.setDraft(sid, "");
+  initial.clearAttachments(sid);
+  let target = sid;
+  const movePending = (id: string) => {
+   target = id;
+   const st = useApp.getState();
+   const pending = st.draftOf(sid);
+   const images = st.attachmentsOf(sid);
+   const occupied = new Set(st.attachmentsOf(id).map((image) => image.slot));
+   const assigned = st.addAttachments(id, images.map((image) => occupied.has(image.slot) ? { ...image, slot: undefined } : image));
+   const mapped = images.length ? restoreImageOrder(withImageOrderNote(pending, images), assigned) : pending;
+   const existing = st.draftOf(id);
+   st.setDraft(id, existing.trim() && mapped.trim() ? `${existing}\n\n${mapped}` : existing + mapped);
+   st.setDraft(sid, "");
+   st.clearAttachments(sid);
+  };
   // 正文引用 `#N` 且带图时补附件顺序注记（只进 wire text；界面 / 标题仍用原文）
   const wireText = withImageOrderNote(text, attachments);
   try {
    if (text.startsWith("/") && attachments.length === 0) {
-    await api.runSlash(sid, text);
+    target = await prepareSessionForSend(sid, movePending);
+    await api.runSlash(target, text);
    } else if (kind === "queue") {
     await api.followUpMessage(sid, wireText, attachments.length ? attachments : undefined);
    } else if (kind === "steer") {
     await api.steerMessage(sid, wireText, attachments.length ? attachments : undefined);
    } else {
-    await api.sendMessage(sid, wireText, attachments.length ? attachments : undefined);
+    target = await prepareSessionForSend(sid, movePending);
+    await api.sendMessage(target, wireText, attachments.length ? attachments : undefined);
     // 新回合开始：上一轮已全部完成的任务清单收起（与桌面 Composer 同一口径）
-    useApp.getState().dismissCompletedPlans(sid);
+    useApp.getState().dismissCompletedPlans(target);
    }
-   const st = useApp.getState();
-   st.setDraft(sid, "");
-   st.clearAttachments(sid);
-   if (text && !text.startsWith("/")) void refreshTitleAfterFirstSend(sid, text).catch(() => undefined);
+   if (text && !text.startsWith("/")) void refreshTitleAfterFirstSend(target, text).catch(() => undefined);
    onSent();
   } catch (e) {
+   const st = useApp.getState();
+   const occupied = new Set(st.attachmentsOf(target).map((image) => image.slot));
+   const restored = st.addAttachments(target, attachments.map((image) => occupied.has(image.slot) ? { ...image, slot: undefined } : image));
+   const original = attachments.length ? restoreImageOrder(withImageOrderNote(text, attachments), restored) : text;
+   const current = st.draftOf(target);
+   st.setDraft(target, original.trim() && current.trim() ? `${original}\n\n${current}` : original + current);
    setError(e instanceof Error ? e.message : String(e));
   } finally {
+   busyRef.current = false;
    setBusy(false);
   }
  };

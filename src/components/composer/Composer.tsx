@@ -19,7 +19,7 @@ import { extractMentions, rewriteMentions } from "../../lib/mentions";
 import { cycleSessionApproval } from "../../lib/sessionApproval";
 import { loadHistory, pushHistory } from "../../lib/promptHistory";
 import { commandInsert, filterCommands, isCompleteCommand, normalizeCommands, SKILL_PREFIX, type SlashCandidate } from "../../lib/slashCommands";
-import { createChatIn, refreshTitleAfterFirstSend } from "../../lib/sessionOpen";
+import { createChatIn, prepareSessionForSend, refreshTitleAfterFirstSend } from "../../lib/sessionOpen";
 import { resolveNewChatCheckout } from "../../lib/checkouts";
 import { useText } from "../../lib/useText";
 import { ProjectPicker } from "../pickers/ProjectPicker";
@@ -34,6 +34,7 @@ import { DraftEditor, type DraftEditorHandle, type DraftTextSource } from "./dra
 import { hasWorkspaceRefs, referenceTarget } from "../../lib/workspaceFiles";
 import { useOutsideDismiss } from "../../lib/useDropdown";
 import { restoreImageOrder, stripImageOrderNote, withImageOrderNote } from "../../lib/imageRefs";
+import { registerDraftTransfer } from "../../lib/draftTransfer";
 import { SlashMenu, type SlashAction } from "./SlashMenu";
 import { ApprovalModeMenu } from "./ApprovalModeMenu";
 import { FastMenu } from "./FastMenu";
@@ -835,6 +836,26 @@ export function Composer() {
   persistDraft(sid, text.trim() && current.trim() ? `${text}\n\n${current}` : text + current);
  };
 
+ /** 保护性分叉后，把等待期间的新草稿与附件转交给实际会话。 */
+ const movePendingDraft = (from: string, to: string) => {
+  const text = currentDraft(from);
+  const images = useApp.getState().attachmentsOf(from);
+  const occupied = new Set(useApp.getState().attachmentsOf(to).map((image) => image.slot));
+  const assigned = addAttachments(to, images.map((image) => occupied.has(image.slot) ? { ...image, slot: undefined } : image));
+  const mapped = images.length > 0 ? restoreImageOrder(withImageOrderNote(text, images), assigned) : text;
+  const current = useApp.getState().draftOf(to);
+  persistDraft(to, current.trim() && mapped.trim() ? `${current}\n\n${mapped}` : current + mapped);
+  persistDraft(from, "");
+  clearAttachments(from);
+ };
+ useLayoutEffect(() => registerDraftTransfer(movePendingDraft));
+
+ const lockMovedSession = (from: string, to: string) => {
+  sendingRef.current.add(to);
+  setSending(new Set(sendingRef.current));
+  movePendingDraft(from, to);
+ };
+
  const sendQueued = async (mode: "steer" | "follow_up") => {
   const sid = activeSessionId;
   const st = useApp.getState();
@@ -846,13 +867,17 @@ export function Composer() {
   // steer 里的 `/skill:…` 不注入技能）。统一走 run_slash，运行中由 omp 排队到下一个边界。
   if (raw.trim().startsWith("/") && sentImages.length === 0) {
    const cmdText = raw.trim();
+   let target = sid;
    try {
-    await api.runSlash(sid, cmdText);
-    pushHistory(sid, cmdText);
+    target = await prepareSessionForSend(sid, (id) => { target = id; lockMovedSession(sid, id); });
+    await api.runSlash(target, cmdText);
+    pushHistory(target, cmdText);
     resetHistory();
-   } catch {
-    restoreDraft(sid, raw, sentImages);
+   } catch (e) {
+    restoreDraft(target, raw, sentImages);
+    setAttachError(e instanceof Error ? e.message : String(e));
    } finally {
+    if (target !== sid) endSend(target);
     endSend(sid);
    }
    return;
@@ -1038,6 +1063,17 @@ export function Composer() {
 
  /** 把一条消息发进指定会话（正常发送与空态新建后共用）：乐观回显 + 失败回滚 + 标题回退。 */
  const sendTextTo = async (sid: string, baseCwd: string, raw: string, sentImages: ImageAttachment[]) => {
+  const sourceSid = sid;
+  let target = sid;
+  try {
+   target = await prepareSessionForSend(sid, (id) => { target = id; lockMovedSession(sid, id); });
+  } catch (e) {
+   restoreDraft(target, raw, sentImages);
+   setAttachError(e instanceof Error ? e.message : String(e));
+   if (target !== sourceSid) endSend(target);
+   return;
+  }
+  sid = target;
   // 输入框里是短标签，omp 只认真路径：发送前展开（回显 / 历史 / 回滚都用原文，用户看到的还是自己写的）
   const text = await expandMentions(raw, baseCwd);
   // 正文引用 `#N` 且带图时，补一行「#N 对应第几张图」的注记（模型只看得到图片顺序；
@@ -1077,9 +1113,10 @@ export function Composer() {
    if (isFirst && raw.trim() && sentImages.length === 0) {
     void refreshTitleAfterFirstSend(sid, raw).catch(() => undefined);
    }
-  } catch {
+  } catch (e) {
    // 发失败就把草稿与附件还回去、不留幽灵消息，不让用户重打一遍
    restoreDraft(sid, raw, sentImages);
+   setAttachError(e instanceof Error ? e.message : String(e));
    const st = useApp.getState();
    st.set({
     eventsBySession: {
@@ -1087,6 +1124,8 @@ export function Composer() {
      [sid]: (st.eventsBySession[sid] ?? []).filter((m) => m.id !== optimisticId),
     },
    });
+  } finally {
+   if (target !== sourceSid) endSend(target);
   }
  };
 
@@ -1182,13 +1221,17 @@ export function Composer() {
    if (!beginSend(sid)) return;
    takeDraft(sid, raw);
    const cmdText = raw.trim();
+   let target = sid;
    try {
-    await api.runSlash(sid, cmdText);
-    pushHistory(sid, cmdText);
+    target = await prepareSessionForSend(sid, (id) => { target = id; lockMovedSession(sid, id); });
+    await api.runSlash(target, cmdText);
+    pushHistory(target, cmdText);
     resetHistory();
-   } catch {
-    restoreDraft(sid, raw, []);
+   } catch (e) {
+    restoreDraft(target, raw, []);
+    setAttachError(e instanceof Error ? e.message : String(e));
    } finally {
+    if (target !== sid) endSend(target);
     endSend(sid);
    }
    return;

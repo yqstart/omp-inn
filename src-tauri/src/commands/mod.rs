@@ -1789,24 +1789,27 @@ pub async fn open_session(app: AppHandle, state: State<'_, AppState>, id: String
     Err(cmd_err("NOT_RUNNING", "会话进程已退出，请重试".into(), None))
 }
 
+/// 取得同一会话的恢复锁；锁只在调用者持有时存活。
+async fn recovery_gate(state: &State<'_, AppState>, id: &str) -> std::sync::Arc<Mutex<Option<String>>> {
+    let mut gates = state.runtime_recovery.lock().await;
+    gates.retain(|_, weak| weak.strong_count() > 0);
+    match gates.get(id).and_then(std::sync::Weak::upgrade) {
+        Some(gate) => gate,
+        None => {
+            let gate = std::sync::Arc::new(Mutex::new(None));
+            gates.insert(id.to_string(), std::sync::Arc::downgrade(&gate));
+            gate
+        }
+    }
+}
+
 /// 确保会话进程存在。并发请求共享恢复结果，包括上游返回的新身份。
 async fn ensure_session_runtime<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &State<'_, AppState>,
     id: &str,
 ) -> Result<String, CmdError> {
-    let gate = {
-        let mut gates = state.runtime_recovery.lock().await;
-        gates.retain(|_, weak| weak.strong_count() > 0);
-        match gates.get(id).and_then(std::sync::Weak::upgrade) {
-            Some(gate) => gate,
-            None => {
-                let gate = std::sync::Arc::new(Mutex::new(None));
-                gates.insert(id.to_string(), std::sync::Arc::downgrade(&gate));
-                gate
-            }
-        }
-    };
+    let gate = recovery_gate(state, id).await;
     let mut recovered = gate.lock().await;
     let mut running = state.runtime.lock().await;
     if let Some(real_id) = recovered.as_ref() {
@@ -2214,12 +2217,15 @@ pub async fn restart_session_runtime(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<SessionView, CmdError> {
-    {
-        let map = state.runtime.lock().await;
+    // 与打开和自动恢复共用单飞锁：重启期间不能同时启动同一会话。
+    let gate = recovery_gate(&state, &id).await;
+    let mut recovered = gate.lock().await;
+    let old = {
+        let mut map = state.runtime.lock().await;
         match map.get(&id) {
             None => {}
             Some(r) => {
-                if r.activity.state() != crate::runtime::ACT_IDLE {
+                if r.activity.state() != crate::runtime::ACT_IDLE || r.activity.input_pending() {
                     return Err(cmd_err("BUSY", "会话正在工作，稍后再试".into(), None));
                 }
                 if r.meta.queued_count.unwrap_or(0) > 0 {
@@ -2227,10 +2233,32 @@ pub async fn restart_session_runtime(
                 }
             }
         }
+        map.remove(&id)
+    };
+    if let Some(mut old) = old {
+        // 持有恢复锁但释放进程表锁，避免等待事件泵时与其清理路径死锁。
+        let graceful = old.tx.send(String::new()).is_ok()
+            && matches!(tokio::time::timeout(std::time::Duration::from_secs(3), old.child.wait()).await, Ok(Ok(_)));
+        if !graceful {
+            if let Err(e) = crate::runtime::stop_failed_child(&mut old).await {
+                state.runtime.lock().await.insert(id.clone(), old);
+                return Err(cmd_err("RUNTIME_STOP", format!("无法确认旧会话进程已退出：{e}"), None));
+            }
+        }
+        let done = async {
+            while !*old.pump_done.borrow_and_update() {
+                if old.pump_done.changed().await.is_err() { break; }
+            }
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(3), done).await.is_err() {
+            state.runtime.lock().await.insert(id.clone(), old);
+            return Err(cmd_err("RUNTIME_STOP", "旧会话事件尚未停止，请重试".into(), None));
+        }
     }
-    kill_runtime(&state, &id);
-    spawn_session_runtime(&app, &state, &id).await?;
-    open_session(app, state, id).await
+    *recovered = None;
+    let head = spawn_session_runtime(&app, &state, &id).await?;
+    *recovered = Some(head.id.clone());
+    Ok(build_session_view(&state, &head.id, &head.title, head.first_user_text.as_deref(), head.cwd.clone(), head.timestamp).await)
 }
 
 /// 单文件工作区 diff（`git diff HEAD -- <path>`；untracked 给文件全文当「全新增」）。
@@ -2495,12 +2523,10 @@ pub(crate) async fn send_prompt<R: tauri::Runtime>(
         req["images"] = serde_json::Value::Array(imgs);
     }
     let line = format!("{}\n", serde_json::to_string(&req).unwrap());
-    let mut target = id.to_string();
     for attempt in 0..2 {
         {
-            // 登记保护与投递必须与闲置回收共用进程表锁。
             let running = map.lock().await;
-            if let Some(r) = running.get(&target).filter(|r| !r.tx.is_closed()) {
+            if let Some(r) = running.get(id).filter(|r| !r.tx.is_closed()) {
                 r.activity.register_input(&request_id, kind);
                 if r.tx.send(line.clone()).is_ok() {
                     return Ok(());
@@ -2508,13 +2534,14 @@ pub(crate) async fn send_prompt<R: tauri::Runtime>(
                 r.activity.cancel_input(&request_id);
             }
         }
-        if kind != "prompt" || attempt == 1 {
-            return Err(cmd_err("RPC_IO", "发送失败，进程可能已退出".into(), None));
+        if kind != "prompt" || attempt == 1 { break; }
+        let actual = ensure_session_runtime(app, state, id).await?;
+        if actual != id {
+            // 已发生分叉但前端尚未订阅：不投递消息，留给用户重新打开后发送。
+            return Err(cmd_err("SESSION_MOVED", "会话已分叉，请重新打开后发送".into(), Some(actual)));
         }
-        // 只在通道未接收时恢复并重试，不重发已经入队的消息。
-        target = ensure_session_runtime(app, state, id).await?;
     }
-    Err(cmd_err("RPC_IO", "发送失败，进程可能已退出".into(), None))
+    Err(cmd_err("RPC_IO", "发送失败，进程可能已退出，请重试".into(), None))
 }
 
 /// 读本地图片为附件（V2 M6）：WebView 拿不到任意本地路径的内容，

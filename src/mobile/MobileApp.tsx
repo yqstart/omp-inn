@@ -119,6 +119,15 @@ export function MobileApp() {
 
  const routeId = route.kind === "session" ? route.id : null;
 
+ /** 打开会话发生身份漂移时，只有用户仍停留在原路由才替换地址。 */
+ const syncRealRoute = useCallback((requested: string, actual: string) => {
+  if (requested === actual || useApp.getState().activeSessionId !== actual) return;
+  const current = readHash().route;
+  if (current.kind !== "session" || current.id !== requested) return;
+  history.replaceState(null, "", `#/s/${actual}`);
+  setRoute({ kind: "session", id: actual });
+ }, []);
+
  useEffect(() => {
   applyTheme(theme);
  }, [theme]);
@@ -206,9 +215,11 @@ export function MobileApp() {
    onRemoteReconnected(() => {
     void refresh();
     const id = useApp.getState().activeSessionId;
-    if (id) void openSessionWithHistory(id).catch(() => undefined);
+    if (id) void openSessionWithHistory(id).then((r) => {
+     if (r.ok) syncRealRoute(id, r.id);
+    }).catch(() => undefined);
    }),
-  [refresh],
+  [refresh, syncRealRoute],
  );
 
  // 打开路由上的会话
@@ -233,6 +244,7 @@ export function MobileApp() {
      if (!alive) return;
      setOpening(false);
      if (!r.ok) setOpenError(t.mobileOffline);
+     else syncRealRoute(routeId, r.id);
     })
     .catch((e: unknown) => {
      if (!alive) return;
@@ -244,7 +256,7 @@ export function MobileApp() {
    alive = false;
    window.clearTimeout(kick);
   };
- }, [auth, routeId, t.mobileOffline]);
+ }, [auth, routeId, t.mobileOffline, syncRealRoute]);
 
  const projectNames = useMemo(() => {
   const out: Record<string, string> = {};
@@ -413,7 +425,10 @@ export function MobileApp() {
         type="button"
         onClick={() => {
          setOpenError(null);
-         void openSessionWithHistory(routeId).catch(() => undefined);
+         void openSessionWithHistory(routeId).then((r) => {
+          if (r.ok) syncRealRoute(routeId, r.id);
+          else setOpenError(t.mobileOffline);
+         }).catch(() => setOpenError(t.mobileOffline));
         }}
         className="cursor-pointer rounded-lg border border-border px-4 py-2 text-[13px] hover:bg-hover"
        >

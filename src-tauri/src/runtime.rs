@@ -134,7 +134,7 @@ impl SessionActivity {
         self.pending_input.lock().unwrap_or_else(|e| e.into_inner()).requests.remove(id);
     }
 
-    fn input_pending(&self) -> bool {
+    pub(crate) fn input_pending(&self) -> bool {
         let pending = self.pending_input.lock().unwrap_or_else(|e| e.into_inner());
         pending.awaiting_settled || !pending.requests.is_empty()
     }
@@ -285,6 +285,8 @@ pub async fn reclaim_idle_now(state: &tauri::State<'_, crate::commands::AppState
 pub struct RunningChild {
     pub tx: mpsc::UnboundedSender<String>,
     pub child: Child,
+    /// 事件泵完全退出后置真，重启时据此等待旧帧处理结束。
+    pub pump_done: tokio::sync::watch::Receiver<bool>,
     /// 运行时真值快照（模型 / 可用思考档 / 当前档 / 用量），供打开会话时回填。
     pub meta: SessionMeta,
     /// spawn 时的 `--cwd`。omp 的 jsonl 是**懒写盘**的（首个 turn 才落文件），
@@ -944,11 +946,13 @@ async fn spawn_long_lived_inner<R: tauri::Runtime>(
         let mut c = old.child;
         let _ = c.kill().await;
     }
+    let (pump_done_tx, pump_done_rx) = tokio::sync::watch::channel(false);
     m.insert(
         sid.clone(),
         RunningChild {
             tx,
             child,
+            pump_done: pump_done_rx,
             meta: meta.clone(),
             cwd: opts.cwd.clone(),
             created_ms: chrono::Utc::now().timestamp_millis(),
@@ -974,6 +978,7 @@ async fn spawn_long_lived_inner<R: tauri::Runtime>(
         leftover,
         activity,
         Some(PathBuf::from(&sfile)),
+        pump_done_tx,
     );
 
     // 开场真值快照：omp 的握手回包里已经有模型 / 思考档 / 上下文占用，但那份回包
@@ -998,6 +1003,7 @@ fn start_pump<R: tauri::Runtime>(
     leftover: Vec<String>,
     activity: Arc<SessionActivity>,
     session_file: Option<PathBuf>,
+    pump_done: tokio::sync::watch::Sender<bool>,
 ) {
     let evt = format!("omp-event://{sid}");
     let status = format!("omp-status://{sid}");
@@ -1097,6 +1103,7 @@ fn start_pump<R: tauri::Runtime>(
                 }
             }
         }
+        let _ = pump_done.send(true);
     });
 }
 

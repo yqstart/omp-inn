@@ -10,7 +10,7 @@
   - pump：stdin 写请求、stdout 读帧、`rpc_chunk` 重组、帧分类；stderr 由 `StderrBuf` 采集。
   - 结束：单会话走 `kill_runtime`；应用退出走 `kill_all`。
 - **事件三通道用会话 id 命名**：`omp-event://<sid>`、`omp-status://<sid>`、`omp-state://<sid>`。sid 必须是完整 uuid（见下节）。
-- **重启即换进程**：执行模式（权限档）在 idle 时改档要重启 runtime；running 时挂起到本轮结束。
+- **重启即换进程**：执行模式（权限档）在 idle 时改档要重启 runtime；running 时挂起到本轮结束。重启先等待旧进程和事件泵退出，再按恢复返回的真实身份继续。
 - **闲置回收**：每 60s 一轮，`ACT_IDLE` 且已落盘、闲置 ≥30 分钟才 kill；重新打开 / 发消息自动 resume。
   - `agent_end{isTerminal:false, awaitingAsyncWork:true}` 折算 `idle-awaiting`，回收跳过。
   - 发送登记与回收判定使用同一进程表锁；未确认的请求和后台任务保护回收，静止回读确认后才解除。旧版缺少确认字段时保守跳过回收。
@@ -23,7 +23,8 @@
 - **open-elsewhere = omp 的保护性 fork**：打开一个已被其他进程持有的会话时，omp 会分到新身份（新 jsonl、`parentSession` 指向原会话、标题继承；日志 `Session moved to a new file / reason: open-elsewhere`）。列表因此出现两个同名会话，常见触发是两个壳实例（安装版 + dev）同时打开同一会话。
 - **壳侧以 spawn 返回的真实 sid 为准**：
   - 后端 `spawn_session_runtime` 身份漂移分支：`sid != 请求 id` 时按新身份的文件读头返回；`send_prompt` 自动恢复同口径。
-  - 前端 `openSessionWithHistory` 全程用 `opened.id`（激活 / 历史 / 导航栈 / 发消息），漂移时补一条说明分隔行。
+  - 前端打开及发送前恢复均使用 `opened.id`（激活 / 历史 / 导航栈 / 发消息），漂移时补一条说明分隔行、迁移草稿与附件，并等事件监听就绪；手机同步路由。
+  - 发送与预检之间若再次发生分叉，后端拒绝投递并返回新身份，前端保留草稿供重试，不把消息发到未订阅的会话。
   - 不许用请求 id 继续——会错位到原会话并反复拉起新进程。
 
 ## 项目路径与外部改名
@@ -121,6 +122,7 @@ omp 对 `--mode rpc-ui` 强制关闭自动标题，壳侧补两层。
 - 设备撤销先在内存生效并断开连接；持久化失败时设置页持续提示重启后可能恢复，支持重试保存。配对记录保存失败时回退内存状态并拒绝交出新令牌。
 - 远程事件连接在订阅撤销通知后复核令牌，转发事件前再次核验；撤销通知漏收或通道关闭时断开连接。
 - 事件由 `remote::emit_event` 镜像；审批帧离线缓存 30 分钟，重连补拉。
+- 手机事件连接以服务端完成订阅后的 `remote://hello` 为就绪信号，重连后补拉状态和待审批。
 - **不许**把远程做成通用 Tauri 桥或第二套聊天语义。
 
 ### 历史回放

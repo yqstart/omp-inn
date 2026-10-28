@@ -2,18 +2,19 @@ import { useEffect } from "react";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { IPC } from "@shared/ipc";
 import { api } from "@shared/api";
-import { isRemoteClient, onRemoteReconnected, remoteListen, remotePending } from "@shared/remote";
+import { isRemoteClient, onRemoteConnection, onRemoteReconnected, remoteListen, remotePending } from "@shared/remote";
 import { useApp } from "../stores/app";
 import type { AskQuestion, BtwRecord, BtwTurn, SessionRuntime, SessionStatus, SubAgentInfo, TodoPhase, ViewMsg } from "@shared/types";
 import { summarizeArgs, mentionFilesOf, diffStatOf, primaryPathOf, TOOL_OUTPUT_FULL_MAX } from "./viewmsg";
 import { fmt, TEXT, type Text } from "./locale";
 import { imagesFromContent } from "./attachments";
-import { stripImageOrderNote } from "./imageRefs";
+import { restoreImageOrder, stripImageOrderNote, withImageOrderNote } from "./imageRefs";
 import { normalizeCommands } from "./slashCommands";
 import { forgetSessionLiveStats } from "./sessionLiveStats";
 import { scheduleWorkspaceGitRefresh } from "./commitTasks";
 import { resolveThinking } from "./thinking";
 import { createStreamBuffer, mergeViewMsgs, type IncomingViewMsg } from "./mergeEvents";
+import { transferEditorDraft } from "./draftTransfer";
 
 /**
  * 把后端转发的 omp 事件归一为 ViewMsg。
@@ -783,6 +784,52 @@ function applyBtwFrame(sid: string, p: Record<string, unknown>) {
 /** 「执行模式切换等生效」的挂起重启集合（重启期间的 exited 状态不上屏）。 */
 const restartingSids = new Set<string>();
 
+/** 已完成三个事件通道注册的会话；身份迁移后发送必须等新监听建立。 */
+const readySessionListeners = new Set<string>();
+const listenerWaiters = new Map<string, Set<() => void>>();
+
+export async function waitForSessionListeners(sid: string): Promise<void> {
+ if (!readySessionListeners.has(sid) || useApp.getState().activeSessionId !== sid) await new Promise<void>((resolve, reject) => {
+  const finish = (error?: Error) => {
+   clearTimeout(timer);
+   unsubscribe();
+   const waiters = listenerWaiters.get(sid);
+   waiters?.delete(ready);
+   if (waiters?.size === 0) listenerWaiters.delete(sid);
+   if (error) reject(error);
+   else resolve();
+  };
+  const ready = () => finish();
+  const unsubscribe = useApp.subscribe((state) => {
+   if (state.activeSessionId !== sid) finish(new Error(TEXT[state.locale].sessionSwitchedBeforeSend));
+  });
+  const timer = setTimeout(() => finish(new Error(TEXT[useApp.getState().locale].sessionListenerNotReady)), 10000);
+  const waiters = listenerWaiters.get(sid) ?? new Set();
+  waiters.add(ready);
+  listenerWaiters.set(sid, waiters);
+  if (useApp.getState().activeSessionId !== sid) finish(new Error(TEXT[useApp.getState().locale].sessionSwitchedBeforeSend));
+  else if (readySessionListeners.has(sid)) finish();
+ });
+ if (isRemoteClient()) await new Promise<void>((resolve, reject) => {
+  let finished = false;
+  let unsubscribe = () => {};
+  const timer = setTimeout(() => finish(false), 10000);
+  const finish = (ready: boolean) => {
+   if (finished) return;
+   finished = true;
+   clearTimeout(timer);
+   unsubscribe();
+   if (ready && useApp.getState().activeSessionId === sid) resolve();
+   else reject(new Error(TEXT[useApp.getState().locale].sessionListenerNotReady));
+  };
+  unsubscribe = onRemoteConnection((state) => {
+   if (state === "open") finish(true);
+   else if (state === "unauthorized") finish(false);
+  });
+  if (finished) unsubscribe();
+ });
+}
+
 /**
  * 重启会话 runtime 让会话级执行模式切换即时生效（V40）：Shift+Tab 在 idle 时直接调它，
  * running 时由挂起标记在转为 idle 后自动调；kill 的 exited 中间态被屏蔽。
@@ -790,13 +837,55 @@ const restartingSids = new Set<string>();
  */
 export async function restartRuntimeForApproval(sid: string): Promise<void> {
  restartingSids.add(sid);
+ let actual = sid;
  try {
-  await api.restartSessionRuntime(sid);
+  const opened = await api.restartSessionRuntime(sid);
+  actual = opened.id;
+  if (actual !== sid) {
+   const st = useApp.getState();
+   const sessions = st.sessions.some((s) => s.id === actual)
+    ? st.sessions.map((s) => s.id === actual ? opened : s)
+    : [opened, ...st.sessions];
+   if (st.activeSessionId === sid && !st.settingsTabActive) {
+    if (!transferEditorDraft(sid, actual)) {
+     const text = st.draftOf(sid);
+     const images = st.attachmentsOf(sid);
+     const occupied = new Set(st.attachmentsOf(actual).map((image) => image.slot));
+     const assigned = st.addAttachments(actual, images.map((image) => occupied.has(image.slot) ? { ...image, slot: undefined } : image));
+     const mapped = images.length ? restoreImageOrder(withImageOrderNote(text, images), assigned) : text;
+     const current = st.draftOf(actual);
+     const merged = current.trim() && mapped.trim() ? `${current}\n\n${mapped}` : current + mapped;
+     st.setDraft(actual, merged);
+     st.setDraft(sid, "");
+     st.clearAttachments(sid);
+     try {
+      const raw = localStorage.getItem("omp.drafts.v1");
+      const drafts = (raw ? JSON.parse(raw) : {}) as Record<string, string>;
+      delete drafts[sid];
+      if (merged) drafts[actual] = merged;
+      else delete drafts[actual];
+      localStorage.setItem("omp.drafts.v1", JSON.stringify(drafts));
+     } catch { /* 草稿仍保留在内存中 */ }
+    }
+    st.set({ sessions, activeSessionId: actual });
+    if (!useApp.getState().eventsBySession[actual]?.some((m) => m.id === "fork-note")) {
+     useApp.getState().appendEvents(actual, [{ kind: "divider", id: "fork-note", divider: "reminder", text: TEXT[st.locale].dividerSessionForked }]);
+    }
+    if (isRemoteClient() && location.hash === `#/s/${sid}`) {
+     history.replaceState(null, "", `#/s/${actual}`);
+     window.dispatchEvent(new HashChangeEvent("hashchange"));
+    }
+    const { openSessionWithHistory } = await import("./sessionOpen");
+    if (useApp.getState().activeSessionId === actual && !useApp.getState().settingsTabActive) await openSessionWithHistory(actual, opened);
+   } else {
+    st.set({ sessions });
+   }
+  }
  } catch {
   // 静默：BUSY / 进程不可用都退回「下次会话生效」
  } finally {
   restartingSids.delete(sid);
-  void syncSessionRuntime(sid);
+  void syncSessionRuntime(actual);
  }
 }
 
@@ -951,6 +1040,8 @@ export function useSessionEvents() {
     return;
    }
    off3 = o3;
+   readySessionListeners.add(sid);
+   for (const ready of listenerWaiters.get(sid) ?? []) ready();
    void syncSessionRuntime(sid);
    // 子代理注册表补拉（V41）：与运行时真值同一次订阅建立时到位
    void syncSubagents(sid);
@@ -977,6 +1068,7 @@ export function useSessionEvents() {
   })();
   return () => {
    disposed = true;
+   readySessionListeners.delete(sid);
    // 未 flush 的帧随会话切走一起丢弃（切回时 get_history 全量重拉，不丢内容）
    buffer.dispose();
    off1?.();

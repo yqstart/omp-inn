@@ -5,7 +5,44 @@ import { fmt, TEXT } from "./locale";
 import { appendLocalNote } from "./localNote";
 import { viewMsgsFromJsonlLines } from "./viewmsg";
 import { mergeToolCard } from "./mergeEvents";
-import { syncSessionRuntime } from "./useSessionEvents";
+import { syncSessionRuntime, waitForSessionListeners } from "./useSessionEvents";
+import { isRemoteClient } from "@shared/remote";
+
+/** 发送前恢复进程；身份发生漂移时先切换视图并等事件监听完成。 */
+export async function prepareSessionForSend(sid: string, moved: (id: string) => void): Promise<string> {
+ const opened = await api.openSession(sid);
+ if (opened.id === sid) {
+  if (useApp.getState().activeSessionId === sid) await waitForSessionListeners(sid);
+  return sid;
+ }
+ const st = useApp.getState();
+ const sessions = st.sessions.some((s) => s.id === opened.id)
+  ? st.sessions.map((s) => s.id === opened.id ? opened : s)
+  : [opened, ...st.sessions];
+ if (st.activeSessionId !== sid || st.settingsTabActive) {
+  st.set({ sessions });
+  throw new Error(TEXT[st.locale].sessionSwitchedBeforeSend);
+ }
+ moved(opened.id);
+ st.set({ sessions, activeSessionId: opened.id });
+ if (!useApp.getState().eventsBySession[opened.id]?.some((m) => m.id === "fork-note")) {
+  useApp.getState().appendEvents(opened.id, [{ kind: "divider", id: "fork-note", divider: "reminder", text: TEXT[st.locale].dividerSessionForked }]);
+ }
+ st.pushNav(opened.id);
+ if (isRemoteClient() && location.hash === `#/s/${sid}`) {
+  history.replaceState(null, "", `#/s/${opened.id}`);
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+ }
+ await waitForSessionListeners(opened.id);
+ if (useApp.getState().settingsTabActive) {
+  throw new Error(TEXT[useApp.getState().locale].sessionSwitchedBeforeSend);
+ }
+ await openSessionWithHistory(opened.id, opened);
+ if (useApp.getState().activeSessionId !== opened.id || useApp.getState().settingsTabActive) {
+  throw new Error(TEXT[useApp.getState().locale].sessionSwitchedBeforeSend);
+ }
+ return opened.id;
+}
 
 /**
  * 历史行 ↔ 实时行的配对键（见 `openSessionWithHistory` 的说明）：

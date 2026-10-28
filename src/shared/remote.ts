@@ -188,14 +188,6 @@ function ensureSocket() {
   ws = socket;
   socket.onopen = () => {
     attempts = 0;
-    setState("open");
-    for (const h of reconnectHandlers) {
-      try {
-        h();
-      } catch {
-        // 忽略
-      }
-    }
   };
   socket.onmessage = (ev) => {
     let frame: { channel?: string; payload?: unknown };
@@ -205,6 +197,13 @@ function ensureSocket() {
       return;
     }
     if (!frame.channel) return;
+    if (frame.channel === "remote://hello") {
+      // 服务端先订阅事件再发送 hello；此时才可认为接收通道就绪。
+      setState("open");
+      for (const h of reconnectHandlers) {
+        try { h(); } catch { /* 忽略 */ }
+      }
+    }
     if (frame.channel === "remote://lagged") {
       // 广播积压：关闭后重连，由页面补历史 / 待审批
       socket.close();
