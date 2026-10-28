@@ -131,6 +131,11 @@ export async function loadEarlierHistory(sid: string, beforeInsert: () => void):
     moved.add(m.id);
     return [mergeToolCard(m, later)];
    }
+   // 重建快照时保留的用户消息可能不在原页，读到同一文件位置后移回对应页。
+   if (m.kind === "user" && later.kind === "user" && m.historyOffset != null && later.historyOffset === m.historyOffset) {
+    moved.add(m.id);
+    return [later];
+   }
    return [];
   });
   for (const row of rows) records[row.id] = row;
@@ -402,12 +407,15 @@ export async function openSessionWithHistory(
   const previous = cur.historyPages[realId];
   // 新旧文件区间没有交集时，旧游标无法覆盖中间的记录；丢掉旧历史快照并从最新页重建。
   // 仅移除对象仍与快照相同的行：实时更新过的卡和未确认的乐观消息必须保留。
+  const fileShrank = !!previous && page.end !== undefined && page.end < previous.end;
   const gap = previous && page.end !== undefined && previous.end > 0 &&
-   (page.end < previous.end || (page.before != null && page.before > previous.end));
+   (fileShrank || (page.before != null && page.before > previous.end));
   if (gap) {
    const remaining = (cur.eventsBySession[realId] ?? [])
     .filter((m) => previous.records[m.id] !== m || (m.kind === "user" && m.awaitingEcho))
-    .map((m) => m.kind === "user" ? { ...m, historyBeforeSend: undefined, historyEndBeforeSend: undefined } : m);
+    .map((m) => fileShrank && m.kind === "user"
+     ? { ...m, historyBeforeSend: undefined, historyEndBeforeSend: undefined, historyOffset: undefined }
+     : m);
    const historyPages = { ...cur.historyPages };
    delete historyPages[realId];
    cur.set({ eventsBySession: { ...cur.eventsBySession, [realId]: remaining }, historyPages });
@@ -481,7 +489,8 @@ export async function openSessionWithHistory(
    const index = matched.get(m.id);
    if (index !== undefined) {
     anchor = index;
-   } else if (previous?.records[m.id] === m && !historyIds.has(m.id) && !gap) {
+   } else if ((previous?.records[m.id] === m && !historyIds.has(m.id) && !gap) ||
+    (gap && !fileShrank && m.kind === "user" && m.historyOffset != null && page.before != null && m.historyOffset < page.before)) {
     earlier.push(m);
    } else if (anchor !== null && position < lastAnchor) {
     const bucket = after.get(anchor) ?? [];
