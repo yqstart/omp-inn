@@ -1299,8 +1299,6 @@ type ViewMsgBase =
   historyBeforeSend?: number;
   /** 发送前已读取的文件末尾；仅用于排除确定早于发送的历史记录。 */
   historyEndBeforeSend?: number;
-  /** 历史用户消息在会话文件中的起始字节位置。 */
-  historyOffset?: number;
   /** 随消息发出的图片（实时帧或 jsonl 的 image 内容块）；渲染为气泡内缩略图。 */
   images?: ImageBlock[];
   /** 因体积过大被刻意省略的图片数（历史回放不做无上限 base64 常驻）。 */
@@ -1382,8 +1380,9 @@ type ViewMsgBase =
  * `at` = 该消息的时间（epoch 毫秒）：历史回放从 jsonl 行的 `timestamp`（RFC3339）或
  * `message.timestamp`（毫秒）归一，实时流为帧到达时刻——轮时长行（`lib/threadLayout.ts`）
  * 靠它计算；缺省（老数据 / 解析不出）即不显示该轮时长，不假装有。
+ * `historyOffset` = 已知历史行在会话文件中的起始字节位置。
  */
-export type ViewMsg = ViewMsgBase & { at?: number };
+export type ViewMsg = ViewMsgBase & { at?: number; historyOffset?: number };
 
 export type SessionStatus =
  | { state: "running" }

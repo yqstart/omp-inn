@@ -95,7 +95,7 @@ export function mergeViewMsgs(cur: ViewMsg[], incoming: IncomingViewMsg[]): View
     // 已完成的行只接受完成态的更新（`text_end` / `message_end` 的收尾；迟到的增量帧
     // 不许把写完的段落重开——那会在流尾留下一个永远的打字机光标）。
     if (!prev.complete || next.complete) {
-     out[idx] = prev.liveId === next.id ? { ...next, id: prev.id, liveId: prev.liveId, seq: prev.seq, at: prev.at ?? next.at } : next;
+     out[idx] = prev.liveId === next.id ? { ...next, id: prev.id, liveId: prev.liveId, seq: prev.seq, at: prev.at ?? next.at, historyOffset: prev.historyOffset } : next;
     }
    }
    continue;
@@ -107,7 +107,7 @@ export function mergeViewMsgs(cur: ViewMsg[], incoming: IncomingViewMsg[]): View
    if (idx >= 0) {
     const prev = out[idx] as Extract<ViewMsg, { kind: "thinking" }>;
     if (!prev.complete || next.complete) {
-     out[idx] = prev.liveId === next.id ? { ...next, id: prev.id, liveId: prev.liveId, at: prev.at ?? next.at } : next;
+     out[idx] = prev.liveId === next.id ? { ...next, id: prev.id, liveId: prev.liveId, at: prev.at ?? next.at, historyOffset: prev.historyOffset } : next;
     }
     continue;
    }

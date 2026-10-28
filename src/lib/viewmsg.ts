@@ -367,7 +367,7 @@ export function viewMsgsFromJsonlLines(lines: unknown[], t: Text, page?: { befor
      const t = String(b.text ?? "");
      // 无内容块（空白 / 孤立标点）不落正文行，见 `textHasContent`
      if (!textHasContent(t)) return;
-     out.push({ kind: "text", id: `t:${lid}:${bi}`, seq: bi, text: t, complete: true, ...(at != null ? { at } : {}) });
+     out.push({ kind: "text", id: `t:${lid}:${bi}`, seq: bi, text: t, complete: true, ...(offset != null ? { historyOffset: offset } : {}), ...(at != null ? { at } : {}) });
     } else if (b.type === "thinking") {
      out.push({
       kind: "thinking",
@@ -375,6 +375,7 @@ export function viewMsgsFromJsonlLines(lines: unknown[], t: Text, page?: { befor
       text: String(b.thinking ?? ""),
       seconds: 0,
       complete: true,
+      ...(offset != null ? { historyOffset: offset } : {}),
       ...(at != null ? { at } : {}),
      });
     } else if (b.type === "toolCall") {

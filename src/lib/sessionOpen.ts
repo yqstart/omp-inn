@@ -153,8 +153,8 @@ export async function loadEarlierHistory(sid: string, beforeInsert: () => void):
     moved.add(m.id);
     return [mergeToolCard(m, later)];
    }
-   // 重建快照时保留的用户消息可能不在原页，读到同一文件位置后移回对应页。
-   if (m.kind === "user" && later.kind === "user" && m.historyOffset != null && later.historyOffset === m.historyOffset) {
+   // 重建快照时保留的消息可能不在原页，读到同一文件位置后移回对应页。
+   if ((m.kind === "user" || m.kind === "text" || m.kind === "thinking") && later.kind === m.kind && m.historyOffset != null && later.historyOffset === m.historyOffset) {
     moved.add(m.id);
     return [later];
    }
@@ -436,9 +436,9 @@ export async function openSessionWithHistory(
   if (gap) {
    const remaining = (cur.eventsBySession[realId] ?? [])
     .filter((m) => previous.records[m.id] !== m || (m.kind === "user" && m.awaitingEcho))
-    .map((m) => fileShrank && m.kind === "user"
+    .map((m) => !fileShrank ? m : m.kind === "user"
      ? { ...m, historyBeforeSend: undefined, historyEndBeforeSend: undefined, historyOffset: undefined }
-     : m);
+     : m.historyOffset != null ? { ...m, historyOffset: undefined } : m);
    const historyPages = { ...cur.historyPages };
    delete historyPages[realId];
    cur.set({ eventsBySession: { ...cur.eventsBySession, [realId]: remaining }, historyPages });
@@ -514,7 +514,7 @@ export async function openSessionWithHistory(
    if (index !== undefined) {
     anchor = index;
    } else if ((previous?.records[m.id] !== undefined && !historyIds.has(m.id) && !gap) ||
-    (gap && !fileShrank && m.kind === "user" && m.historyOffset != null && page.before != null && m.historyOffset < page.before)) {
+    (gap && !fileShrank && m.historyOffset != null && page.before != null && m.historyOffset < page.before)) {
     earlier.push(m);
    } else if (anchor !== null && position < lastAnchor) {
     const bucket = after.get(anchor) ?? [];
