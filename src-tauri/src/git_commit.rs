@@ -57,10 +57,12 @@ impl CancelToken {
     }
 
     async fn wait(&self) {
+        // 先创建通知等待对象再检查标志，避免取消发生在检查和订阅之间时漏掉唤醒。
+        let notified = self.notify.notified();
         if self.is_canceled() {
             return;
         }
-        self.notify.notified().await;
+        notified.await;
     }
 }
 
