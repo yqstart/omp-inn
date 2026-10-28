@@ -387,7 +387,11 @@ pub(crate) async fn pump_child(
     on_line: impl FnMut(&str, OutStream),
 ) -> RunSignals {
     let mut child = child.into();
-    pump_child_inner(&mut child, pid, cancel, on_line).await
+    let signals = pump_child_inner(&mut child, pid, cancel, on_line).await;
+    if signals.canceled {
+        let _ = child.wait_tree().await;
+    }
+    signals
 }
 
 async fn pump_child_inner(
@@ -455,26 +459,51 @@ async fn pump_child_inner(
             break;
         }
     }
-    let code = if canceled { child.wait_tree().await } else { child.wait_parent().await }.ok().and_then(|s| s.code());
+    let code = child.wait_parent().await.ok().and_then(|s| s.code());
     RunSignals { canceled, code, out_tail, err_tail }
 }
 
-/// 超时后仍持有子进程句柄，先停止进程树，再等待直接子进程回收。
+enum PumpFailure {
+    Timeout(&'static str),
+    CancelCleanup,
+}
+
+impl PumpFailure {
+    fn cleanup_confirmed(&self) -> bool {
+        matches!(self, Self::Timeout(""))
+    }
+
+    fn message(self, timeout: &str) -> String {
+        match self {
+            Self::Timeout(detail) => format!("{timeout}{detail}"),
+            Self::CancelCleanup => "取消后无法确认进程树已退出".into(),
+        }
+    }
+}
+
+/// 超时后仍持有子进程句柄，先停止进程树，再等待回收。
 async fn pump_child_with_timeout(
     mut child: ManagedChild,
     pid: Option<u32>,
     cancel: Option<&CancelToken>,
     timeout: Duration,
     on_line: impl FnMut(&str, OutStream),
-) -> Result<RunSignals, &'static str> {
+) -> Result<RunSignals, PumpFailure> {
     match tokio::time::timeout(timeout, pump_child_inner(&mut child, pid, cancel, on_line)).await {
+        Ok(signals) if signals.canceled => {
+            // 作业等待只调用一次：底层实现被中断后可能缓存父进程状态，不能重试当作确认。
+            match tokio::time::timeout(Duration::from_secs(5), child.wait_tree()).await {
+                Ok(Ok(_)) => Ok(signals),
+                _ => Err(PumpFailure::CancelCleanup),
+            }
+        }
         Ok(signals) => Ok(signals),
         Err(_) => {
             let tree_signaled = child.stop_tree(pid);
             match tokio::time::timeout(Duration::from_secs(5), child.wait_tree()).await {
-                Ok(Ok(_)) if tree_signaled => Err(""),
-                Ok(Ok(_)) => Err("；无法确认进程树已退出"),
-                _ => Err("；无法确认子进程已退出"),
+                Ok(Ok(_)) if tree_signaled => Err(PumpFailure::Timeout("")),
+                Ok(Ok(_)) => Err(PumpFailure::Timeout("；无法确认进程树已退出")),
+                _ => Err(PumpFailure::Timeout("；无法确认进程树已退出")),
             }
         }
     }
@@ -600,7 +629,7 @@ pub(crate) async fn run_git_commit(
     let pid = child.id();
     match pump_child_with_timeout(child, pid, Some(cancel), COMMIT_TIMEOUT, |l, s| on_line(l, s)).await {
         Ok(signals) => Ok(signals),
-        Err(detail) => Err(format!("git commit 超时（120s）{detail}")),
+        Err(failure) => Err(failure.message("git commit 超时（120s）")),
     }
 }
 
@@ -642,7 +671,7 @@ pub(crate) async fn run_git_push(
     let pid = child.id();
     let signals = match pump_child_with_timeout(child, pid, Some(cancel), PUSH_TIMEOUT, |l, s| on_line(l, s)).await {
         Ok(s) => s,
-        Err(detail) => return Err((format!("git push 超时（120s）{detail}"), None)),
+        Err(failure) => return Err((failure.message("git push 超时（120s）"), None)),
     };
     if signals.canceled {
         return Err(("推送已取消".to_string(), None));
@@ -818,10 +847,11 @@ pub async fn generate_commit_message(
         };
         let signals = match pump_child_with_timeout(child, pid, Some(&cancel), GEN_TIMEOUT, &mut log).await {
             Ok(s) => s,
-            Err(detail) => {
+            Err(failure) => {
                 let mut outcome = CommitOutcome::new(CommitPhase::Failed);
-                outcome.error = Some(format!("生成提交信息超时（180s）{detail}"));
-                outcome.hint = Some("可以改用「完整提交（含 CHANGELOG）」".into());
+                let cleanup_confirmed = failure.cleanup_confirmed();
+                outcome.error = Some(failure.message("生成提交信息超时（180s）"));
+                if cleanup_confirmed { outcome.hint = Some("可以改用「完整提交（含 CHANGELOG）」".into()); }
                 let _ = on_event.send(CommitEvent::Exit { outcome });
                 release(&tasks, &cwd_key, seq);
                 return;
@@ -969,10 +999,11 @@ pub async fn start_full_commit(
         };
         let signals = match pump_child_with_timeout(child, pid, Some(&cancel), FULL_TIMEOUT, &mut log).await {
             Ok(s) => s,
-            Err(detail) => {
+            Err(failure) => {
                 outcome.phase = CommitPhase::Failed;
-                outcome.error = Some(format!("omp commit 超时（600s）{detail}"));
-                outcome.hint = Some("可以改用快速提交".into());
+                let cleanup_confirmed = failure.cleanup_confirmed();
+                outcome.error = Some(failure.message("omp commit 超时（600s）"));
+                if cleanup_confirmed { outcome.hint = Some("可以改用快速提交".into()); }
                 let _ = on_event.send(CommitEvent::Exit { outcome });
                 release(&tasks, &cwd_key, seq);
                 return;
