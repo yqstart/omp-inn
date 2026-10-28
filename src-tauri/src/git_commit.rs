@@ -398,7 +398,7 @@ pub(crate) async fn pump_child(
     on_line: impl FnMut(&str, OutStream),
 ) -> RunSignals {
     let mut child = child.into();
-    let signals = pump_child_inner(&mut child, pid, cancel, on_line).await;
+    let (signals, _) = pump_child_inner(&mut child, pid, cancel, on_line).await;
     if signals.canceled {
         let _ = child.wait_tree().await;
     }
@@ -410,10 +410,11 @@ async fn pump_child_inner(
     pid: Option<u32>,
     cancel: Option<&CancelToken>,
     mut on_line: impl FnMut(&str, OutStream),
-) -> RunSignals {
+) -> (RunSignals, bool) {
     let mut stdout = BufReader::new(child.stdout().take().expect("stdout piped")).lines();
     let mut stderr = BufReader::new(child.stderr().take().expect("stderr piped")).lines();
     let mut canceled = false;
+    let mut tree_signaled = false;
     let mut out_tail: Vec<String> = vec![];
     let mut err_tail: Vec<String> = vec![];
     let mut stdout_open = true;
@@ -436,7 +437,8 @@ async fn pump_child_inner(
             _ = cancel_wait, if !canceled => {
                 canceled = true;
                 // 先停止进程树；Windows 提交任务通过作业对象覆盖父进程已退出的情况。
-                let _ = child.stop_tree(pid);
+                tree_signaled = child.stop_tree(pid);
+                break;
             }
             line = stdout.next_line(), if stdout_open => match line {
                 Ok(Some(l)) => {
@@ -470,8 +472,22 @@ async fn pump_child_inner(
             break;
         }
     }
-    let code = child.wait_parent().await.ok().and_then(|s| s.code());
-    RunSignals { canceled, code, out_tail, err_tail }
+    // 输出管道关闭并不代表进程已经退出，等待退出期间仍需响应取消。
+    let code = if canceled {
+        None
+    } else if let Some(cancel) = cancel {
+        tokio::select! {
+            status = child.wait_parent() => status.ok().and_then(|s| s.code()),
+            _ = cancel.wait() => {
+                canceled = true;
+                tree_signaled = child.stop_tree(pid);
+                None
+            }
+        }
+    } else {
+        child.wait_parent().await.ok().and_then(|s| s.code())
+    };
+    (RunSignals { canceled, code, out_tail, err_tail }, tree_signaled)
 }
 
 enum PumpFailure {
@@ -501,14 +517,14 @@ async fn pump_child_with_timeout(
     on_line: impl FnMut(&str, OutStream),
 ) -> Result<RunSignals, PumpFailure> {
     match tokio::time::timeout(timeout, pump_child_inner(&mut child, pid, cancel, on_line)).await {
-        Ok(signals) if signals.canceled => {
+        Ok((signals, tree_signaled)) if signals.canceled => {
             // 作业等待只调用一次：底层实现被中断后可能缓存父进程状态，不能重试当作确认。
             match tokio::time::timeout(Duration::from_secs(5), child.wait_tree()).await {
-                Ok(Ok(_)) => Ok(signals),
+                Ok(Ok(_)) if tree_signaled => Ok(signals),
                 _ => Err(PumpFailure::CancelCleanup),
             }
         }
-        Ok(signals) => Ok(signals),
+        Ok((signals, _)) => Ok(signals),
         Err(_) => {
             let tree_signaled = child.stop_tree(pid);
             match tokio::time::timeout(Duration::from_secs(5), child.wait_tree()).await {
@@ -1156,20 +1172,17 @@ pub async fn push_workspace(state: State<'_, AppState>, cwd: String, on_event: C
     Ok(())
 }
 
-/// 取消运行中的任务：置取消位 + 打当前子进程的进程组（收尾时落 `canceled` 终态）。
+/// 取消运行中的任务：通知执行方停止进程树并确认清理结果。
 #[tauri::command]
 pub async fn cancel_commit_task(state: State<'_, AppState>, cwd: String) -> Result<(), CmdError> {
-    let (cancel, pid) = {
+    let cancel = {
         let map = state.commit_tasks.lock().unwrap_or_else(|e| e.into_inner());
         match map.get(&cwd) {
-            Some(t) => (t.cancel.clone(), t.pid),
+            Some(t) => t.cancel.clone(),
             None => return Err(cmd_err("NOT_RUNNING", "当前没有进行中的提交任务".into(), None)),
         }
     };
     cancel.cancel();
-    if let Some(pid) = pid {
-        force_kill_group(pid);
-    }
     Ok(())
 }
 
