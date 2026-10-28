@@ -61,9 +61,9 @@ const localPairKey = (m: ViewMsg): string | null =>
    ? `user\u0000${m.sentText ?? m.text}`
    : null
   : m.kind === "text"
-   ? `text\u0000${m.text}`
+   ? m.id.startsWith("t:") ? null : `text\u0000${m.text}`
    : m.kind === "thinking"
-    ? `thinking\u0000${m.text}`
+    ? m.id.startsWith("th:") ? null : `thinking\u0000${m.text}`
     : null;
 /** 历史侧同口径（user 行没有 `u-local-` / `u-echo-` 前缀，一律参与配对）。 */
 const historyPairKey = (m: ViewMsg): string | null =>
@@ -513,7 +513,7 @@ export async function openSessionWithHistory(
    const index = matched.get(m.id);
    if (index !== undefined) {
     anchor = index;
-   } else if ((previous?.records[m.id] === m && !historyIds.has(m.id) && !gap) ||
+   } else if ((previous?.records[m.id] !== undefined && !historyIds.has(m.id) && !gap) ||
     (gap && !fileShrank && m.kind === "user" && m.historyOffset != null && page.before != null && m.historyOffset < page.before)) {
     earlier.push(m);
    } else if (anchor !== null && position < lastAnchor) {
