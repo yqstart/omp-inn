@@ -22,14 +22,14 @@ import { transferEditorDraft } from "./draftTransfer";
  * 此处只处理实时帧的增量形态（message_update 三类 delta 等）。
  */
 type Fold = {
- textId: string | null;
- text: string;
- thinkingId: string | null;
- thinking: string;
+ /** 上游消息身份到本会话序号；只保留尚未结束的消息。 */
+ messageSeqs: Map<string, number>;
+ /** 并发消息和内容块各自累积，避免插入其他消息后串流。 */
+ texts: Map<string, string>;
+ thoughts: Map<string, { text: string; startedAt: number }>;
  /** toolcall 占位卡的正式 id（`tool:<toolCallId>`；从 `partial` 拿到后记下，见 toolcall 分支）。 */
  toolIds: Record<string, string>;
  toolMeta: Record<string, { name: string; intent: string; streamIndex: number }>;
- startedAt: number;
  /**
   * 当前 assistant 消息的序号（每次 `message_start` +1）。实时行的 id 是
   * `${sid}:${msgSeq}:${contentIndex}`——**contentIndex 在每条新消息里都从 0 重新数**，
@@ -127,7 +127,7 @@ export function __resetFolds() {
 const getFold = (sid: string): Fold => {
  let f = folds.get(sid);
  if (!f) {
-  f = { textId: null, text: "", thinkingId: null, thinking: "", toolIds: {}, toolMeta: {}, startedAt: Date.now(), msgSeq: 0 };
+  f = { messageSeqs: new Map(), texts: new Map(), thoughts: new Map(), toolIds: {}, toolMeta: {}, msgSeq: 0 };
   folds.set(sid, f);
  }
  return f;
@@ -138,11 +138,18 @@ export function frameToViewMsgs(sid: string, frame: Record<string, unknown>, dic
  const t = frame.type as string;
  const fold = getFold(sid);
  const out: ViewMsg[] = [];
+ const messageId = typeof frame.messageId === "string" && frame.messageId ? frame.messageId : null;
+ let msgSeq = fold.msgSeq;
  if (t === "message_start" || t === "message_end") {
   const m = frame.message as { role?: string; content?: { type?: string; text?: string }[]; files?: unknown };
   // 每条新消息换一段 id 空间（contentIndex 在新消息里从 0 重新数，见 Fold.msgSeq）。
   // 必须在 handler 最前：`message_end` 要用同一个 msgSeq 给文本块补 id。
-  if (t === "message_start") fold.msgSeq += 1;
+  if (t === "message_start") {
+   msgSeq = ++fold.msgSeq;
+   if (messageId && m?.role === "assistant") fold.messageSeqs.set(messageId, msgSeq);
+  } else if (messageId && m?.role === "assistant") {
+   msgSeq = fold.messageSeqs.get(messageId) ?? ++fold.msgSeq;
+  }
   // @文件 提及（V2 M6b）：omp 读进上下文的文件，渲染成一排芯片。
   // id 由文件清单决定：message_start / message_end 重复推同一条消息时只出一排芯片。
   if (m?.role === "fileMention") {
@@ -183,7 +190,7 @@ export function frameToViewMsgs(sid: string, frame: Record<string, unknown>, dic
    const rule = /rule="([^"]+)"/.exec(text)?.[1];
    out.push({
     kind: "divider",
-    id: `${sid}:rem:${fold.msgSeq}`,
+    id: `${sid}:rem:${msgSeq}`,
     divider: "reminder",
     text: rule ? fmt(dict.dividerRuleReminder, rule) : dict.dividerRuleReminderPlain,
    });
@@ -194,47 +201,51 @@ export function frameToViewMsgs(sid: string, frame: Record<string, unknown>, dic
  if (t === "message_update") {
   const e = frame.assistantMessageEvent as { type?: string; contentIndex?: number; delta?: string; content?: string; partial?: unknown; toolCall?: { id?: string; name?: string; arguments?: Record<string, unknown>; streamIndex?: number; intent?: string } };
   if (!e) return out;
-  const key = `${sid}:${fold.msgSeq}:${e.contentIndex ?? 0}`;
+  if (messageId) {
+   const known = fold.messageSeqs.get(messageId);
+   msgSeq = known ?? ++fold.msgSeq;
+   if (known === undefined) fold.messageSeqs.set(messageId, msgSeq);
+  }
+  const key = `${sid}:${msgSeq}:${e.contentIndex ?? 0}`;
   if (e.type === "text_start") {
-   fold.textId = key;
-   fold.text = "";
+   fold.texts.set(key, "");
    out.push({ kind: "text", id: key, seq: 0, text: "", complete: false });
   } else if (e.type === "text_delta") {
-   fold.text += e.delta ?? "";
-   out.push({ kind: "text", id: key, seq: 0, text: fold.text, complete: false, __append: true } as ViewMsg);
+   const text = (fold.texts.get(key) ?? "") + (e.delta ?? "");
+   fold.texts.set(key, text);
+   out.push({ kind: "text", id: key, seq: 0, text, complete: false, __append: true } as ViewMsg);
   } else if (e.type === "text_end") {
    // 文本段完结（omp 在每条 assistant 消息里对每个文本块发一次；`content` 是全文）。
    // 不消费它的话这一行永远 `complete:false`：流式光标一直挂在已写完的段落上，
    // `hasLiveTail` 也把它当"还在输出"（「思考中…」指示行不再出现）。
-   const text = e.content ?? fold.text;
-   fold.textId = null;
-   fold.text = "";
+   const text = e.content ?? fold.texts.get(key) ?? "";
+   fold.texts.delete(key);
    if (text) out.push({ kind: "text", id: key, seq: 0, text, complete: true, __append: true } as ViewMsg);
   } else if (e.type === "thinking_start") {
-   fold.thinkingId = key;
-   fold.thinking = "";
-   fold.startedAt = Date.now();
+   fold.thoughts.set(key, { text: "", startedAt: Date.now() });
   } else if (e.type === "thinking_delta") {
-   fold.thinking += e.delta ?? "";
+   const thought = fold.thoughts.get(key) ?? { text: "", startedAt: Date.now() };
+   thought.text += e.delta ?? "";
+   fold.thoughts.set(key, thought);
    // 流式「思考中…」：首个 delta 就按同 id 推出（mergeViewMsgs 原位覆盖）。
    // 此前只在 thinking_end 落一条完成态——思考全程界面上没有任何运行迹象。
-   out.push({ kind: "thinking", id: key, text: fold.thinking, seconds: 0, complete: false });
+   out.push({ kind: "thinking", id: key, text: thought.text, seconds: 0, complete: false });
   } else if (e.type === "thinking_end") {
-   const text = e.content || fold.thinking;
+   const thought = fold.thoughts.get(key);
+   const text = e.content || thought?.text || "";
    // 空思考不产块（模型只发 thinking_start/end 不带内容时，此前会留下一条
    // 「思考 · 持续了 0 秒」的空块噪声）；有内容的就地落定为完成态。
    // 已经流过增量的块即使内容只剩空白也要落定，否则那一行永远停在「思考中…」。
-   if (text.trim() || fold.thinkingId) {
+   if (text.trim() || thought) {
     out.push({
      kind: "thinking",
      id: key,
      text,
-     seconds: Math.max(0, Math.round((Date.now() - fold.startedAt) / 1000)),
+     seconds: Math.max(0, Math.round((Date.now() - (thought?.startedAt ?? Date.now())) / 1000)),
      complete: true,
     });
    }
-   fold.thinking = "";
-   fold.thinkingId = null;
+   fold.thoughts.delete(key);
   } else if (e.type === "toolcall_start" || e.type === "toolcall_delta") {
    // 占位卡从**第一帧就带真名**：omp 实测 `partial`（当时那条完整 assistant 消息）
    // 在本帧的块里已含 `{type:"toolCall", name, id, args, partialArgs}`——此前占位卡
@@ -305,7 +316,7 @@ export function frameToViewMsgs(sid: string, frame: Record<string, unknown>, dic
     if (b.type === "text" && b.text) {
      out.push({
       kind: "text",
-      id: `${sid}:${fold.msgSeq}:${i}`,
+      id: `${sid}:${msgSeq}:${i}`,
       seq: 0,
       text: b.text,
       complete: true,
@@ -313,6 +324,10 @@ export function frameToViewMsgs(sid: string, frame: Record<string, unknown>, dic
      } as IncomingViewMsg);
     }
    }
+   if (messageId) fold.messageSeqs.delete(messageId);
+   const prefix = `${sid}:${msgSeq}:`;
+   for (const key of fold.texts.keys()) if (key.startsWith(prefix)) fold.texts.delete(key);
+   for (const key of fold.thoughts.keys()) if (key.startsWith(prefix)) fold.thoughts.delete(key);
   }
   if (m?.role === "toolResult") {
    const text = (m.content ?? []).filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n");
@@ -525,7 +540,14 @@ export function frameToViewMsgs(sid: string, frame: Record<string, unknown>, dic
   return out;
  }
  if (t === "subagent_progress" || t === "subagent_event") return out;
- if (t === "turn_start" || t === "turn_end" || t === "agent_start" || t === "agent_end") return out;
+ if (t === "agent_end") {
+  // 中断时可能没有 message_end；结束后释放未收尾的流式累积。
+  fold.messageSeqs.clear();
+  fold.texts.clear();
+  fold.thoughts.clear();
+  return out;
+ }
+ if (t === "turn_start" || t === "turn_end" || t === "agent_start") return out;
  // 会话标题变更，两种来源都消费：
  // - `session_info_update`（omp 原生命令改了标题——壳侧的自动补标题走 `/rename`，实测
  //   18.10.3 的 rpc-ui 就发这个帧，带 `title`）；
