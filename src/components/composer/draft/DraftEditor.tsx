@@ -26,6 +26,7 @@ import {
  $isTextNode,
  $setSelection,
  type LexicalNode,
+ type ElementNode,
  type RangeSelection,
 } from "lexical";
 import {
@@ -64,6 +65,10 @@ const TAG_SYNC = "omp-sync";
 export type DraftEditorHandle = {
  /** 全文（`@引用` 序列化成**真路径**，所以这就是发给 omp 的 prompt 形态）。 */
  getText: () => string;
+ /** 读取待提交状态，不触发更新通知。 */
+ peekText: () => string;
+ /** 在草稿末尾追加引用块，与现有内容留空行。 */
+ appendQuote: (text: string) => void;
  /** 光标所在文本节点里、光标之前的那一段（`@` 补全取词用）。 */
  getTextBeforeCaret: () => string;
  /** 光标是否在整段草稿的最开头（↑ 调回历史用；多行编辑中不该抢走方向键）。 */
@@ -164,7 +169,7 @@ function $needsLeadingSpace(): boolean {
 }
 
 /** 把一个段落填成这段文本（`\n` 走 LineBreakNode，保持"一个段落"的口径）。 */
-function $fillParagraph(paragraph: ReturnType<typeof $createParagraphNode>, text: string): void {
+function $fillParagraph(paragraph: ElementNode, text: string): void {
  const lines = text.split("\n");
  lines.forEach((line, index) => {
   if (index > 0) paragraph.append($createLineBreakNode());
@@ -282,10 +287,24 @@ function EditorBridge({
  useImperativeHandle(
   handleRef,
   () => ({
-   getText: () => editor.getEditorState().read(() => $draftText()),
+   // 提交尚未上报的更新后再读，发送时不能只读上一次已提交的快照。
+   getText: () => editor.read(() => $draftText()),
+   peekText: () => editor.read("pending", () => $draftText()),
+   appendQuote: (text: string) => editor.update(() => {
+    const root = $getRoot();
+    const current = $draftText();
+    const block = `${current.trim() ? "\n\n" : ""}${text}\n\n`;
+    const paragraph = root.getFirstChild();
+    if ($isElementNode(paragraph)) {
+     $fillParagraph(paragraph, block);
+     paragraph.selectEnd();
+    } else {
+     $replaceAll(current + block);
+    }
+   }, { tag: TAG_INSERT, discrete: true }),
    getTextBeforeCaret: () => editor.getEditorState().read(() => $textBeforeCaret()),
    isCaretAtStart: () => editor.getEditorState().read(() => $isCaretAtStart()),
-   setText: (text: string) => editor.update(() => $replaceAll(text), { tag: TAG_SYNC }),
+   setText: (text: string) => editor.update(() => $replaceAll(text), { tag: TAG_SYNC, discrete: true }),
    insertText: (text: string) =>
     editor.update(() => {
      if (text.length === 0) return;

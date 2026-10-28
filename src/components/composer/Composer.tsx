@@ -1,5 +1,7 @@
 import {
+ useCallback,
  useEffect,
+ useLayoutEffect,
  useMemo,
  useRef,
  useState,
@@ -43,6 +45,7 @@ const PASTE_FILE_MIN = 2000;
 
 /** 空态输入卡的草稿键：`activeSessionId === null` 时也要有草稿，发送时再新建会话。 */
 const NEW_DRAFT = "__new__";
+const NEW_DRAFT_RECOVERY = "omp.newDraftRecovery.v1";
 
 /**
  * 会话输入卡（v2 §3 形态，对齐 Codex / ZCode 的输入卡）：
@@ -80,6 +83,13 @@ export function Composer() {
   useApp();
  /** 草稿编辑器句柄（Lexical；不受控——编辑器状态是权威，store 里的草稿是它的投影）。 */
  const editorRef = useRef<DraftEditorHandle | null>(null);
+ /** 编辑器当前承载的会话和最近一次已同步文本。 */
+ const editorSessionRef = useRef(activeSessionId ?? NEW_DRAFT);
+ const editorProjectionRef = useRef("");
+ const syncEditor = useCallback((text: string) => {
+  editorProjectionRef.current = text;
+  editorRef.current?.setText(text);
+ }, []);
  /** `+` / `/` 共用面板与 `@` 补全的容器（点外部关闭时判断「里面」）。 */
  const panelRef = useRef<HTMLDivElement>(null);
  const mentionRef = useRef<HTMLDivElement>(null);
@@ -89,7 +99,10 @@ export function Composer() {
  useEffect(() => {
   if (composerFocusSeq > 0) editorRef.current?.focus();
  }, [composerFocusSeq]);
- const persistDraft = (sid: string | null, text: string) => {
+ const persistDraft = useCallback((sid: string | null, text: string, source: "editor" | "external" = "external") => {
+  if (source === "external" && sid && editorSessionRef.current === sid) {
+   syncEditor(text);
+  }
   setDraft(sid, text);
   if (sid) {
    try {
@@ -102,27 +115,75 @@ export function Composer() {
     // 持久化失败不阻断输入
    }
   }
- };
+ }, [setDraft, syncEditor]);
+ /** 读指定编辑器；外部草稿与尚未提交的输入同时变化时，两者都保留。 */
+ const readEditorDraft = useCallback((sid: string, handle: DraftEditorHandle): string => {
+   const stored = useApp.getState().draftOf(sid);
+   const projected = editorProjectionRef.current;
+   if (stored !== projected) {
+    const pending = handle.peekText();
+    if (pending !== projected && pending !== stored) {
+     handle.getText();
+     return stored.trim() && pending.trim() ? `${stored}\n\n${pending}` : stored + pending;
+    }
+    return stored;
+   }
+   return handle.getText();
+ }, []);
+ /** 编辑器可能还属于刚切走的会话，按其实际所属读取。 */
+ const currentDraft = useCallback((sid: string): string => {
+  if (editorSessionRef.current === sid && editorRef.current) return readEditorDraft(sid, editorRef.current);
+  return useApp.getState().draftOf(sid);
+ }, [readEditorDraft]);
  const draft = draftOf(activeSessionId ?? NEW_DRAFT);
  /** 空态草稿键（没有活动会话时不落到 `drafts[null]`，否则输入会丢）。 */
  const draftKey = activeSessionId ?? NEW_DRAFT;
+ const archived = sessions.find((s) => s.id === activeSessionId)?.archived;
+ // 切会话或归档导致编辑器卸载前，先提交旧编辑器尚未上报的内容。
+ useLayoutEffect(() => {
+  const handle = editorRef.current;
+  const sid = draftKey;
+  return () => {
+   const state = useApp.getState();
+   const switched = (state.activeSessionId ?? NEW_DRAFT) !== sid;
+   const nowArchived = state.sessions.some((session) => session.id === sid && session.archived);
+   if (!handle || editorSessionRef.current !== sid || (!switched && !nowArchived)) return;
+   const text = readEditorDraft(sid, handle);
+   if (text !== useApp.getState().draftOf(sid)) persistDraft(sid, text);
+  };
+ }, [draftKey, archived, readEditorDraft, persistDraft]);
  /**
   * 草稿投影同步：store 里的草稿是**外部写入**的入口（队列退回 / 历史调回 / 切会话），
   * 与编辑器当前全文不一致时才灌进去（编辑器自己打字时两者一致，不会重置光标）。
   * 高度不再手工算——编辑器是真实 DOM（CSS 封顶 `max-h-44` 后内部滚动）。
   */
- useEffect(() => {
+ useLayoutEffect(() => {
   const handle = editorRef.current;
-  if (!handle) return;
-  if (handle.getText() !== draft) handle.setText(draft);
- }, [draft]);
+  if (!handle) {
+   editorSessionRef.current = draftKey;
+   // 编辑器未挂载，不把待恢复草稿误认为已投影。
+   editorProjectionRef.current = "";
+   return;
+  }
+  if ((useApp.getState().activeSessionId ?? NEW_DRAFT) !== draftKey) return;
+  if (editorSessionRef.current !== draftKey) {
+   const previousSid = editorSessionRef.current;
+   const previous = currentDraft(previousSid);
+   if (previous !== useApp.getState().draftOf(previousSid)) persistDraft(previousSid, previous);
+   editorSessionRef.current = draftKey;
+   syncEditor(useApp.getState().draftOf(draftKey));
+   return;
+  }
+  const next = currentDraft(draftKey);
+  if (next !== useApp.getState().draftOf(draftKey)) persistDraft(draftKey, next);
+  else if (handle.peekText() !== next) syncEditor(next);
+ }, [draft, draftKey, archived, currentDraft, persistDraft, syncEditor]);
  const attachments = attachmentsOf(activeSessionId);
  /** 待发队列真值（V40）：omp 的 steering / followUp 芯片文本（`queue_update` 驱动）。 */
  const queued = queuedOf(activeSessionId);
  const status = activeSessionId ? statusBySession[activeSessionId]?.state : undefined;
  const running = status === "running" || status === "awaiting-approval";
  const awaiting = status === "awaiting-approval";
- const archived = sessions.find((s) => s.id === activeSessionId)?.archived;
  // @文件 提及（V2 M6b）：展开由 omp 做，这里只把草稿里的提及显示成芯片并问一次「路径存在吗」
  const cwd = sessions.find((s) => s.id === activeSessionId)?.cwd ?? "";
  // 卡内顶行（2026-10-22 从卡外搬回卡内）：项目 + 分支 + 提交；git 查询与右栏共用 `useGitInfo`
@@ -167,8 +228,21 @@ export function Composer() {
    .join("\n");
  }, [checks, mentionKey, mentions]);
  const [attachError, setAttachError] = useState<string | null>(null);
+ const [recoveredDraft, setRecoveredDraft] = useState(() => {
+  try { return localStorage.getItem(NEW_DRAFT_RECOVERY) ?? ""; } catch { return ""; }
+ });
+ const saveRecoveredDraft = (text: string) => {
+  setRecoveredDraft((previous) => {
+   const next = previous.trim() && text.trim() ? `${previous}\n\n${text}` : previous + text;
+   try { localStorage.setItem(NEW_DRAFT_RECOVERY, next); } catch { /* 保留在本次内存中 */ }
+   return next;
+  });
+ };
  /** 空态首条消息「先新建会话」在飞：防重复点击，发送键在此期间禁用。 */
  const [creating, setCreating] = useState(false);
+ const creatingRef = useRef(false);
+ const sendingRef = useRef(new Set<string>());
+ const [sending, setSending] = useState<Set<string>>(() => new Set());
  const [dragging, setDragging] = useState(false);
  // `@` 补全状态：mentionIdx 为高亮下标，-1 = 无补全；mentionToken 是 `@` 后的路径前缀。
  const [mentionIdx, setMentionIdx] = useState(-1);
@@ -335,7 +409,7 @@ export function Composer() {
  const pickCommand = (c: SlashCandidate) => {
   const sp = draft.search(/\s/);
   const tail = sp >= 0 ? draft.slice(sp).trimStart() : "";
-  setDraft(activeSessionId, commandInsert(c) + tail);
+  persistDraft(activeSessionId, commandInsert(c) + tail);
   setSlashDismissed(slashToken);
   setToolsOpen(false);
  };
@@ -344,24 +418,33 @@ export function Composer() {
  // 编辑器非受控，所以引用只能这样进来（改草稿文本只会显示成长路径文本，不是芯片）。
  const pendingReference = useApp((s) => s.pendingReference);
  useEffect(() => {
-  if (!pendingReference || pendingReference.sessionId !== activeSessionId) return;
-  editorRef.current?.insertReference({
-   path: pendingReference.path,
-   label: pendingReference.label,
-   isDir: pendingReference.isDir,
-  });
-  useApp.getState().clearPendingReference();
- }, [pendingReference, activeSessionId]);
+  if (!pendingReference) return;
+  if (pendingReference.sessionId !== activeSessionId) {
+   useApp.getState().selectPendingReference(activeSessionId);
+   return;
+  }
+  const handle = editorRef.current;
+  if (!handle || editorSessionRef.current !== pendingReference.sessionId) return;
+  if (pendingReference.kind === "quote") {
+   const text = currentDraft(pendingReference.sessionId);
+   if (handle.peekText() !== text) persistDraft(pendingReference.sessionId, text);
+   handle.appendQuote(pendingReference.text);
+  } else {
+   handle.insertReference({ path: pendingReference.path, label: pendingReference.label, isDir: pendingReference.isDir });
+  }
+  useApp.getState().clearPendingReference(pendingReference.seq);
+ }, [pendingReference, activeSessionId, archived, currentDraft, persistDraft]);
 
  /**
   * 草稿文本变化（编辑器每次 update 上报）：落 store + localStorage；
   * 用户编辑即退出历史浏览（文本保留，下次 ↑ 从最近一条重新开始）。
   */
  const handleText = (text: string, source: DraftTextSource) => {
+  editorProjectionRef.current = text;
   // `sync` = 把 store 的草稿投影进编辑器，store 本来就是权威：不回写
   // （回写会让迟到的投影通知覆盖更新的草稿，例如发送失败后的回滚）
   if (source === "sync") return;
-  persistDraft(draftKey, text);
+  persistDraft(editorSessionRef.current, text, "editor");
   // 只有用户敲的才算「编辑」；壳插入引用不该打断历史浏览（否则 ↑ 调回后被立刻清掉）
   if (source === "user" && browsing) setHist(null);
  };
@@ -508,7 +591,7 @@ export function Composer() {
    !archived &&
    !slashOpen &&
    mentionEmpty &&
-   (draft.trim() || attachments.length > 0)
+   (currentDraft(activeSessionId).trim() || useApp.getState().attachmentsOf(activeSessionId).length > 0)
   ) {
    void sendQueued("follow_up");
    return true;
@@ -719,43 +802,76 @@ export function Composer() {
   }
  };
 
+ /** 同会话的发送串行；锁在首个异步操作前取得，避免连续按键重复发送。 */
+ const beginSend = (sid: string): boolean => {
+  if (creatingRef.current || sendingRef.current.has(sid)) return false;
+  sendingRef.current.add(sid);
+  setSending(new Set(sendingRef.current));
+  return true;
+ };
+
+ const endSend = (sid: string) => {
+  sendingRef.current.delete(sid);
+  setSending(new Set(sendingRef.current));
+ };
+
+ /** 在任何异步操作前取走当前草稿；后续输入属于下一条消息。 */
+ const takeDraft = (sid: string, raw: string) => {
+  const st = useApp.getState();
+  const images = st.attachmentsOf(sid);
+  persistDraft(sid, "");
+  clearAttachments(sid);
+  return { raw, images };
+ };
+
+ /** 失败时保留新输入；图片重新编号后同步失败消息中的引用，避免与新附件冲突。 */
+ const restoreDraft = (sid: string, raw: string, images: ImageAttachment[]) => {
+  const occupied = new Set(useApp.getState().attachmentsOf(sid).map((image) => image.slot));
+  const restoredImages = addAttachments(sid, images.map((image) =>
+   occupied.has(image.slot) ? { ...image, slot: undefined } : image,
+  ));
+  const text = images.length > 0 ? restoreImageOrder(withImageOrderNote(raw, images), restoredImages) : raw;
+  const current = currentDraft(sid);
+  persistDraft(sid, text.trim() && current.trim() ? `${text}\n\n${current}` : text + current);
+ };
+
  const sendQueued = async (mode: "steer" | "follow_up") => {
-  if (!activeSessionId || (!draft.trim() && attachments.length === 0) || archived) return;
-  const raw = draft;
+  const sid = activeSessionId;
+  const st = useApp.getState();
+  if (!sid) return;
+  const raw = currentDraft(sid);
+  if ((!raw.trim() && st.attachmentsOf(sid).length === 0) || archived || !beginSend(sid)) return;
+  const { images: sentImages } = takeDraft(sid, raw);
   // `/` 开头的命令不能走 steer / follow_up：omp 只在 `prompt` 入口过命令门（实测
   // steer 里的 `/skill:…` 不注入技能）。统一走 run_slash，运行中由 omp 排队到下一个边界。
-  if (raw.trim().startsWith("/") && attachments.length === 0) {
+  if (raw.trim().startsWith("/") && sentImages.length === 0) {
    const cmdText = raw.trim();
-   persistDraft(activeSessionId, "");
    try {
-    await api.runSlash(activeSessionId, cmdText);
-    pushHistory(activeSessionId, cmdText);
+    await api.runSlash(sid, cmdText);
+    pushHistory(sid, cmdText);
     resetHistory();
    } catch {
-    persistDraft(activeSessionId, cmdText);
+    restoreDraft(sid, raw, sentImages);
+   } finally {
+    endSend(sid);
    }
    return;
   }
-  const text = await expandMentions(raw, cwd);
-  const sentImages = attachments;
-  // 正文里引用了 `#N` 时补一行附件顺序注记（只影响发给 omp 的文本，回显 / 历史仍用原文）
-  const wireText = withImageOrderNote(text, sentImages);
-  // 清空 / 回滚都走 persistDraft（带 localStorage 同步）：只清内存的话，
-  // 已发送的内容下次启动会被 hydrateDrafts 从 `omp.drafts.v1` 恢复回输入框（幽灵草稿）。
-  persistDraft(activeSessionId, "");
-  clearAttachments(activeSessionId);
   try {
+   const text = await expandMentions(raw, cwd);
+   const wireText = withImageOrderNote(text, sentImages);
    const fn = mode === "steer" ? api.steerMessage : api.followUpMessage;
    await fn(
-    activeSessionId,
+    sid,
     wireText,
     sentImages.map((a) => ({ name: a.name, mimeType: a.mimeType, dataBase64: a.dataBase64, bytes: a.bytes })),
    );
-   pushHistory(activeSessionId, text);
+   pushHistory(sid, raw);
    resetHistory();
   } catch {
-   persistDraft(activeSessionId, raw);
-   addAttachments(activeSessionId, sentImages);
+   restoreDraft(sid, raw, sentImages);
+  } finally {
+   endSend(sid);
   }
  };
 
@@ -794,7 +910,7 @@ export function Composer() {
    const back = await shortenMentions(text);
    const images = addAttachments(sid, (r.images ?? []).map(attachmentFromOmpImage));
    const restored = restoreImageOrder(back, images);
-   const cur = useApp.getState().draftOf(sid);
+   const cur = currentDraft(sid);
    persistDraft(sid, cur.trim() ? `${cur}\n\n${restored}` : restored);
    editorRef.current?.focus();
   } catch {
@@ -841,7 +957,7 @@ export function Composer() {
      .filter((x) => x.trim())
      .join("\n\n");
     if (text) {
-     const cur = useApp.getState().draftOf(sid);
+     const cur = currentDraft(sid);
      persistDraft(sid, cur.trim() ? `${cur}\n\n${text}` : text);
     }
     editorRef.current?.focus();
@@ -878,7 +994,6 @@ export function Composer() {
  /** 会话内反馈：往消息流尾追加一条本地 command 行（灰字代码区，与 omp 命令输出同款）。 */
  const localNote = (sid: string, text: string) => {
   useApp.getState().appendEvents(sid, [
-   // eslint-disable-next-line react-hooks/purity -- localNote 只在事件处理器里调用，非 render
    { kind: "command", id: `lc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, output: text } as ViewMsg,
   ]);
  };
@@ -932,7 +1047,6 @@ export function Composer() {
   const isFirst = !(useApp.getState().eventsBySession[sid] ?? []).some((m) => m.kind === "user");
   // 乐观回显：先落一条本地 user 消息，id 带时间戳；
   // 历史回放里同一文本的 `u:<行id>` 到达时按文本合并去重，不翻倍。
-  // eslint-disable-next-line react-hooks/purity -- send 是点击事件处理，非 render
   const optimisticId = `u-local-${Date.now()}`;
   useApp.getState().appendEvents(sid, [
    {
@@ -945,8 +1059,6 @@ export function Composer() {
      : {}),
    } as never,
   ]);
-  persistDraft(sid, "");
-  clearAttachments(sid);
   try {
    await api.sendMessage(
     sid,
@@ -966,8 +1078,7 @@ export function Composer() {
    }
   } catch {
    // 发失败就把草稿与附件还回去、不留幽灵消息，不让用户重打一遍
-   persistDraft(sid, raw);
-   addAttachments(sid, sentImages);
+   restoreDraft(sid, raw, sentImages);
    const st = useApp.getState();
    st.set({
     eventsBySession: {
@@ -983,25 +1094,65 @@ export function Composer() {
   * 目录与 ⌘T 同口径（`resolveNewChatCheckout`），没有可用目录时退回第一个项目路径。
   */
  const sendFirstInNewChat = async () => {
-  const raw = draft;
-  if (!raw.trim() || creating) return;
+  const raw = currentDraft(NEW_DRAFT);
+  if (!raw.trim() || !beginSend(NEW_DRAFT)) return;
   const dir = resolveNewChatCheckout(checkouts)?.path ?? projects[0]?.path ?? "";
   if (!dir) {
    setAttachError(t.newChatNoProject);
+   endSend(NEW_DRAFT);
    return;
   }
+  creatingRef.current = true;
   setCreating(true);
   setAttachError(null);
-  const res = await createChatIn(dir);
-  if (!res.ok) {
-   setAttachError(res.message);
+  takeDraft(NEW_DRAFT, raw);
+  const generation = { navigated: false, pending: "" };
+  const unsubscribe = useApp.subscribe((next, previous) => {
+   const switchedSession = next.activeSessionId !== previous.activeSessionId;
+   const openedSettings = next.settingsTabActive && !previous.settingsTabActive;
+   if (!switchedSession && !openedSettings) return;
+   if (!generation.navigated && previous.activeSessionId === null) {
+    generation.navigated = true;
+    generation.pending = currentDraft(NEW_DRAFT);
+    persistDraft(NEW_DRAFT, "");
+   } else {
+    generation.navigated = true;
+   }
+  });
+  let restoreSid = NEW_DRAFT;
+  try {
+   const res = await createChatIn(dir, { shouldActivate: () => !generation.navigated });
+   if (!res.ok) {
+    setAttachError(res.message);
+    if (generation.navigated) {
+     saveRecoveredDraft(raw.trim() && generation.pending.trim() ? `${raw}\n\n${generation.pending}` : raw + generation.pending);
+    } else {
+     restoreDraft(NEW_DRAFT, raw, []);
+    }
+    return;
+   }
+   restoreSid = res.id;
+   // 只迁移启动本次新建时所属代次的空态草稿。
+   const pending = generation.pending;
+   const current = currentDraft(res.id);
+   if (pending) {
+    persistDraft(res.id, pending.trim() && current.trim() ? `${pending}\n\n${current}` : pending + current);
+   }
+   const created = useApp.getState().sessions.find((s) => s.id === res.id);
+   await sendTextTo(res.id, created?.cwd ?? dir, raw, []);
+  } catch (e) {
+   if (restoreSid === NEW_DRAFT && generation.navigated) {
+    saveRecoveredDraft(raw.trim() && generation.pending.trim() ? `${raw}\n\n${generation.pending}` : raw + generation.pending);
+   } else {
+    restoreDraft(restoreSid, raw, []);
+   }
+   setAttachError(e instanceof Error ? e.message : String(e));
+  } finally {
+   unsubscribe();
+   creatingRef.current = false;
    setCreating(false);
-   return;
+   endSend(NEW_DRAFT);
   }
-  persistDraft(NEW_DRAFT, "");
-  const created = useApp.getState().sessions.find((s) => s.id === res.id);
-  setCreating(false);
-  await sendTextTo(res.id, created?.cwd ?? dir, raw, []);
  };
 
  const send = async () => {
@@ -1010,36 +1161,49 @@ export function Composer() {
    void sendFirstInNewChat();
    return;
   }
+  const sid = activeSessionId;
+  const st = useApp.getState();
+  const raw = currentDraft(sid);
+  const images = st.attachmentsOf(sid);
+  if ((!raw.trim() && images.length === 0) || archived || creatingRef.current || sendingRef.current.has(sid)) return;
   // `!` 前缀 = 本地 shell（V41，codex 的 `!` 用法）：在会话进程的工作目录跑一条命令，
   // 命令行与输出各落一条流尾 command 行；运行中也可用（omp 的 bash 是 concurrent 分发）。
-  if (draft.trim().startsWith("!") && draft.trim().length > 1 && !archived && attachments.length === 0) {
-   const cmd = draft.trim().slice(1).trim();
-   persistDraft(activeSessionId, "");
-   void runShell(activeSessionId, cmd);
+  if (raw.trim().startsWith("!") && raw.trim().length > 1 && images.length === 0) {
+   const cmd = raw.trim().slice(1).trim();
+   takeDraft(sid, raw);
+   void runShell(sid, cmd);
    return;
   }
   // `/` 开头一律走 omp 命令面（run_slash 直发）：omp 在 `prompt` 入口过命令门，
   // `/skill:<名>` 会被解析成技能注入（实测 skill-prompt），运行中则由 omp 排到下一个边界。
   // 走 steer 只会把 `/skill:…` 当普通文本，技能不会被加载——所以不能按 running 改道。
-  if (draft.trim().startsWith("/") && attachments.length === 0 && !archived) {
-   const cmdText = draft.trim();
-   persistDraft(activeSessionId, "");
+  if (raw.trim().startsWith("/") && images.length === 0) {
+   if (!beginSend(sid)) return;
+   takeDraft(sid, raw);
+   const cmdText = raw.trim();
    try {
-    await api.runSlash(activeSessionId, cmdText);
-    pushHistory(activeSessionId, cmdText);
+    await api.runSlash(sid, cmdText);
+    pushHistory(sid, cmdText);
     resetHistory();
    } catch {
-    persistDraft(activeSessionId, cmdText);
+    restoreDraft(sid, raw, []);
+   } finally {
+    endSend(sid);
    }
    return;
   }
-  if (running && (draft.trim() || attachments.length > 0) && !archived) {
+  if (running) {
    // 流式中 Enter = 插话（steer），与 omp 终端的 Enter 一致
    void sendQueued("steer");
    return;
   }
-  if ((!draft.trim() && attachments.length === 0) || running || archived) return;
-  await sendTextTo(activeSessionId, cwd, draft, attachments);
+  if (!beginSend(sid)) return;
+  const snapshot = takeDraft(sid, raw);
+  try {
+   await sendTextTo(sid, cwd, snapshot.raw, snapshot.images);
+  } finally {
+   endSend(sid);
+  }
  };
 
  if (archived) {
@@ -1144,6 +1308,16 @@ export function Composer() {
      </div>
     )}
     {attachError && <div className="px-4 pt-2 text-[13px] text-danger">{attachError}</div>}
+    {recoveredDraft && !activeSessionId && (
+     <button type="button" className="mx-4 mt-2 text-left text-[13px] text-warn" onClick={() => {
+      const current = currentDraft(NEW_DRAFT);
+      persistDraft(NEW_DRAFT, current.trim() && recoveredDraft.trim() ? `${current}\n\n${recoveredDraft}` : current + recoveredDraft);
+      setRecoveredDraft("");
+      try { localStorage.removeItem(NEW_DRAFT_RECOVERY); } catch { /* 不影响当前草稿 */ }
+     }}>
+      {t.newChatRestoreDraft}
+     </button>
+    )}
     {/* 引用**不再单独排一行芯片**（2026-10-17 用户口径：标签已经融入正文，别又展示 tag 又展示路径）。
         只有解析不到的引用才提示——那时用户需要知道「它不会被读进上下文」。 */}
     {missingMentions.length > 0 && (
@@ -1251,7 +1425,7 @@ export function Composer() {
       ) : (
        <button
         onClick={() => void send()}
-        disabled={(!draft.trim() && attachments.length === 0) || awaiting || creating}
+        disabled={(!draft.trim() && attachments.length === 0) || awaiting || creating || sending.has(draftKey)}
         className="ml-1 flex h-7 w-7 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground transition-opacity duration-150 hover:opacity-90 disabled:cursor-default disabled:opacity-30"
         aria-label={t.sendAria}
        >

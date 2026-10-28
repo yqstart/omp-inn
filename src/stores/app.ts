@@ -193,7 +193,10 @@ type AppState = {
  setDraft: (sid: string | null, text: string) => void;
  /** 把一枚引用芯片插进指定会话的草稿（消费方是 Composer；见 `PendingReference`）。 */
  insertDraftReference: (sid: string | null, ref: { path: string; label: string; isDir: boolean }) => void;
- clearPendingReference: () => void;
+ /** 将消息引用块追加到指定会话草稿。 */
+ insertDraftQuote: (sid: string | null, text: string) => void;
+ selectPendingReference: (sid: string | null) => void;
+ clearPendingReference: (seq?: number) => void;
  attachmentsOf: (sid: string | null) => ImageAttachment[];
  /** 附件入库唯一入口：分配稳定编号（`slot`）并返回并入的那批（带编号，供调用方补 `#N` 占位）。 */
  addAttachments: (sid: string | null, items: ImageAttachment[]) => ImageAttachment[];
@@ -275,11 +278,13 @@ type AppState = {
  /** Composer 聚焦序号：引用浮层注入草稿后 +1，让输入框拿回焦点接着写。 */
  composerFocusSeq: number;
  /**
-  * 待插入的**引用芯片**（右栏文件树 / 快速过滤 / ⌘⇧P 引用浮层 → Composer）：
+  * 待插入的引用（右栏文件树 / 引用浮层 / 消息列 → Composer）：
   * 草稿编辑器是非受控的（Lexical 状态是权威），所以引用不能靠改草稿文本来插入——
-  * 外部写入这一条请求，Composer 消费后插进编辑器并清空（`seq` 防重放）。
+  * 外部只经这一通道投递；按会话保序，Composer 消费后推进队列。
   */
  pendingReference: PendingReference | null;
+ pendingReferenceQueue: PendingReference[];
+ pendingReferenceSeq: number;
  /**
   * git 信息刷新信号（全局自增）：**唯一写入面**是 `lib/commitTasks.ts` 的
   * `refreshWorkspaceGitState`（git 状态的统一刷新入口：启动 / 焦点 / 30s 轮询 /
@@ -512,6 +517,19 @@ function loadWorkbenchWidth(): number {
  }
 }
 
+/** 新引用入队；当前会话的请求优先消费，各会话内部保持投递顺序。 */
+function enqueueReference(s: AppState, item: PendingReference): Partial<AppState> {
+ if (!s.pendingReference) return { pendingReferenceSeq: item.seq, pendingReference: item };
+ const queue = [...s.pendingReferenceQueue, item];
+ if (item.sessionId === s.activeSessionId && s.pendingReference.sessionId !== item.sessionId) {
+  const index = queue.findIndex((entry) => entry.sessionId === item.sessionId);
+  const next = queue.splice(index, 1)[0];
+  queue.unshift(s.pendingReference);
+  return { pendingReferenceSeq: item.seq, pendingReference: next, pendingReferenceQueue: queue };
+ }
+ return { pendingReferenceSeq: item.seq, pendingReferenceQueue: queue };
+}
+
 export const useApp = create<AppState>((set, get) => ({
  health: null,
  projects: [],
@@ -707,11 +725,38 @@ export const useApp = create<AppState>((set, get) => ({
  /** 投递一次「把引用插进草稿」的请求（Composer 消费后清空；`seq` 让重复内容也能触发）。 */
  insertDraftReference: (sid, ref) => {
   if (!sid) return;
-  set((s) => ({
-   pendingReference: { sessionId: sid, ...ref, seq: (s.pendingReference?.seq ?? 0) + 1 },
-  }));
+  set((s) => {
+   const seq = s.pendingReferenceSeq + 1;
+   const item: PendingReference = { sessionId: sid, ...ref, seq };
+   return enqueueReference(s, item);
+  });
  },
- clearPendingReference: () => set({ pendingReference: null }),
+ insertDraftQuote: (sid, text) => {
+  if (!sid) return;
+  set((s) => {
+   const seq = s.pendingReferenceSeq + 1;
+   const item: PendingReference = { sessionId: sid, kind: "quote", text, seq };
+   return enqueueReference(s, item);
+  });
+ },
+ selectPendingReference: (sid) => set((s) => {
+  if (!sid || !s.pendingReference || s.pendingReference.sessionId === sid) return s;
+  const index = s.pendingReferenceQueue.findIndex((item) => item.sessionId === sid);
+  if (index < 0) return s;
+  const next = s.pendingReferenceQueue[index];
+  const queue = [...s.pendingReferenceQueue];
+  queue.splice(index, 1);
+  queue.unshift(s.pendingReference);
+  return { pendingReference: next, pendingReferenceQueue: queue };
+ }),
+ clearPendingReference: (seq) => set((s) => {
+  if (!s.pendingReference || (seq !== undefined && s.pendingReference.seq !== seq)) return s;
+  const queue = [...s.pendingReferenceQueue];
+  const active = queue.findIndex((item) => item.sessionId === s.activeSessionId);
+  const index = active >= 0 ? active : 0;
+  const next = queue.splice(index, 1)[0] ?? null;
+  return { pendingReference: next, pendingReferenceQueue: queue };
+ }),
  attachmentsOf: (sid) => (sid ? get().attachmentsBySession[sid] ?? [] : []),
  addAttachments: (sid, items) => {
   if (!sid || items.length === 0) return [];
@@ -856,6 +901,8 @@ export const useApp = create<AppState>((set, get) => ({
  refPickerTarget: null,
  composerFocusSeq: 0,
  pendingReference: null,
+ pendingReferenceQueue: [],
+ pendingReferenceSeq: 0,
  gitInfoSeq: 0,
 
  // ---------- V19 工作区提交 / 推送（见 lib/commitTasks.ts） ----------

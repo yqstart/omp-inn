@@ -302,12 +302,11 @@ export function Thread() {
  const quoteSelection = () => {
   const sid = activeSessionId;
   if (!sid || !sel) return;
-  const block = `${sel.text
+  const block = sel.text
    .split("\n")
    .map((l) => `> ${l}`)
-   .join("\n")}\n\n`;
-  const old = useApp.getState().draftOf(sid);
-  useApp.getState().setDraft(sid, old.trim() ? `${old}\n\n${block}` : block);
+   .join("\n");
+  useApp.getState().insertDraftQuote(sid, block);
   setSel(null);
  };
  /** 旁问：带着选中文本打开面板（预填进输入框，不自动发送）。 */
