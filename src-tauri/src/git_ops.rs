@@ -197,6 +197,34 @@ pub fn parse_status_porcelain_z(out: &str, numstat: &str) -> Vec<ChangeFile> {
     files
 }
 
+/// 是否超出变更面板的完整展示上限；改名条目的原名不是另一条变更。
+fn status_exceeds_limit(out: &str) -> bool {
+    let mut tokens = out.split('\0');
+    let mut count = 0usize;
+    while let Some(token) = tokens.next() {
+        if token.is_empty() || token.starts_with("## ") || token.len() < 3 {
+            continue;
+        }
+        let bytes = token.as_bytes();
+        count += 1;
+        if count > MAX_CHANGE_FILES {
+            return true;
+        }
+        if matches!(bytes[0], b'R' | b'C') || matches!(bytes[1], b'R' | b'C') {
+            let _ = tokens.next();
+        }
+    }
+    false
+}
+
+fn change_set_too_large() -> CmdError {
+    cmd_err(
+        "CHANGE_SET_TOO_LARGE",
+        format!("变更超过 {MAX_CHANGE_FILES} 项，无法完整展示和安全同步暂存区"),
+        Some("请先使用外部 Git 工具处理部分变更，再重新打开提交面板".into()),
+    )
+}
+
 /// 摘出 `git status --porcelain=v1 -b -z` 的头段（`## …`）；没有则返回空串。
 pub fn split_status_header_z(out: &str) -> (&str, &str) {
     match out.split_once('\0') {
@@ -381,6 +409,13 @@ pub(crate) async fn apply_selection(git: &str, cwd: &str, paths: &[String]) -> R
         return Err(cmd_err("NO_SELECTION", "请至少勾选一个文件".into(), None));
     }
     let root = work_root(git, cwd).await;
+    // 不完整的面板勾选不能作为整个暂存区的真值；执行前再查一次，覆盖面板打开后变更增长的情况。
+    let status = run_git_timeout(git, &root, &["status", "--porcelain=v1", "-z"], SLOW)
+        .await
+        .map_err(|e| cmd_err("STATUS_FAILED", e, None))?;
+    if status_exceeds_limit(&status) {
+        return Err(change_set_too_large());
+    }
     let staged = staged_paths(git, &root)
         .await
         .map_err(|e| cmd_err("STATUS_FAILED", e, None))?;
@@ -438,6 +473,10 @@ pub async fn get_change_set(cwd: String) -> Result<ChangeSet, CmdError> {
         .await
         .map_err(|e| cmd_err("STATUS_FAILED", e, None))?;
     let (header, body) = split_status_header_z(&status);
+    // 超限时不能把截断结果伪装成完整勾选，否则隐藏的暂存项会被取消。
+    if status_exceeds_limit(body) {
+        return Err(change_set_too_large());
+    }
     let (upstream, ahead, behind, upstream_gone) = crate::git_commit::parse_status_header(header);
     // numstat 覆盖「已跟踪的改动」；空仓库（没有 HEAD）退到只看暂存区
     let numstat = match run_git_timeout(&git, &cwd, &["diff", "HEAD", "--numstat", "-z"], SLOW).await {
