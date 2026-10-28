@@ -143,7 +143,14 @@ export async function loadEarlierHistory(sid: string, beforeInsert: () => void):
    const later = byId.get(m.id);
    if (!later) {
     const key = historyPairKey(m);
-    const local = key ? localByKey.get(key)?.shift() : undefined;
+    const candidates = key ? localByKey.get(key) : undefined;
+    // 页内也可能跨过发送时已读的文件末尾；逐条排除明确更早的记录。
+    const candidateIndex = candidates?.findIndex((id) => {
+     const local = byId.get(id);
+     return m.kind !== "user" || local?.kind !== "user" || m.historyOffset == null ||
+      local.historyEndBeforeSend == null || m.historyOffset >= local.historyEndBeforeSend;
+    }) ?? -1;
+    const local = candidateIndex < 0 ? undefined : candidates?.splice(candidateIndex, 1)[0];
     if (local) {
      moved.add(local);
      const original = byId.get(local);
