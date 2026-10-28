@@ -2330,11 +2330,13 @@ pub async fn export_session_html(
     Ok(serde_json::json!({ "path": abs }))
 }
 
-/// 大段粘贴转文件引用（V41）：把一段长文本写进 `<appData>/omp-inn/paste/paste-<ts>.txt`，
+/// 大段粘贴转文件引用（V41）：把一段长文本写进 `<appData>/omp-inn/paste/`，
 /// 返回绝对路径——前端把它以 `@<path>` 注入草稿，omp 在 prompt 阶段读进上下文（fileMention）。
-/// 文件名带毫秒时间戳，同毫秒连贴也互不覆盖；不自动清理（保留供用户回看，量级极小）。
+/// 随机文件名配合排他创建，跨进程并发时也不会覆盖已有文件。
 #[tauri::command]
 pub async fn save_paste(app: AppHandle, text: String) -> Result<serde_json::Value, CmdError> {
+    use std::io::Write;
+
     let dir = app
         .path()
         .app_data_dir()
@@ -2342,10 +2344,23 @@ pub async fn save_paste(app: AppHandle, text: String) -> Result<serde_json::Valu
         .join("omp-inn")
         .join("paste");
     std::fs::create_dir_all(&dir).map_err(|e| cmd_err("IO", format!("创建粘贴目录失败：{e}"), None))?;
-    let name = format!("paste-{}.txt", chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"));
-    let path = dir.join(name);
-    std::fs::write(&path, text).map_err(|e| cmd_err("IO", format!("写入粘贴文件失败：{e}"), None))?;
-    Ok(serde_json::json!({ "path": path.to_string_lossy() }))
+    for _ in 0..16 {
+        let name = format!("paste-{}-{:032x}.txt", chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"), rand::random::<u128>());
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(text.as_bytes()) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(cmd_err("IO", format!("写入粘贴文件失败：{e}"), None));
+                }
+                return Ok(serde_json::json!({ "path": path.to_string_lossy() }));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(cmd_err("IO", format!("创建粘贴文件失败：{e}"), None)),
+        }
+    }
+    Err(cmd_err("IO", "创建粘贴文件失败：文件名冲突，请重试".into(), None))
 }
 
 /// 本地 shell（V41，codex 的 `!` 前缀）：在**会话进程的工作目录**跑一条命令并取回输出
