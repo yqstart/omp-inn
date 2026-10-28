@@ -40,20 +40,29 @@ use crate::proc::{force_kill_group, login_path, ManagedChild};
 pub struct CancelToken {
     flag: AtomicBool,
     notify: tokio::sync::Notify,
+    launch: Mutex<()>,
 }
 
 impl CancelToken {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { flag: AtomicBool::new(false), notify: tokio::sync::Notify::new() })
+        Arc::new(Self { flag: AtomicBool::new(false), notify: tokio::sync::Notify::new(), launch: Mutex::new(()) })
     }
 
     pub fn cancel(&self) {
+        let _guard = self.launch.lock().unwrap_or_else(|e| e.into_inner());
         self.flag.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
     }
 
     pub fn is_canceled(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
+    }
+
+    /// 启动与取消串行；取消先发生时不再创建新的子进程。
+    fn spawn_if_active<T>(&self, spawn: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<Option<T>> {
+        let _guard = self.launch.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_canceled() { return Ok(None); }
+        spawn().map(Some)
     }
 
     async fn wait(&self) {
@@ -625,7 +634,11 @@ pub(crate) async fn run_git_commit(
     on_line: &mut (impl FnMut(&str, OutStream) + Send),
 ) -> Result<RunSignals, String> {
     let args = ["commit", "--cleanup=strip", "-F", "-"];
-    let child = spawn_git(git, cwd, &args, Some(message)).map_err(|e| format!("启动 git commit 失败：{e}"))?;
+    let child = match cancel.spawn_if_active(|| spawn_git(git, cwd, &args, Some(message)))
+        .map_err(|e| format!("启动 git commit 失败：{e}"))? {
+        Some(child) => child,
+        None => return Ok(RunSignals { canceled: true, code: None, out_tail: vec![], err_tail: vec![] }),
+    };
     let pid = child.id();
     match pump_child_with_timeout(child, pid, Some(cancel), COMMIT_TIMEOUT, |l, s| on_line(l, s)).await {
         Ok(signals) => Ok(signals),
@@ -641,6 +654,7 @@ pub(crate) async fn run_git_push(
     cancel: &CancelToken,
     on_line: &mut (impl FnMut(&str, OutStream) + Send),
 ) -> Result<(), (String, Option<String>, bool)> {
+    if cancel.is_canceled() { return Err(("推送已取消".to_string(), None, true)); }
     // 分支：detached HEAD / 无提交时无法推送
     let head_out = run_git(git, cwd, &["status", "--porcelain=v1", "-b", "-z"])
         .await
@@ -667,7 +681,11 @@ pub(crate) async fn run_git_push(
         (e, Some("在终端里执行 git remote add origin <url>".to_string()), false)
     })?;
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let child = spawn_git(git, cwd, &refs, None).map_err(|e| (format!("启动 git push 失败：{e}"), None, false))?;
+    let child = match cancel.spawn_if_active(|| spawn_git(git, cwd, &refs, None))
+        .map_err(|e| (format!("启动 git push 失败：{e}"), None, false))? {
+        Some(child) => child,
+        None => return Err(("推送已取消".to_string(), None, true)),
+    };
     let pid = child.id();
     let signals = match pump_child_with_timeout(child, pid, Some(cancel), PUSH_TIMEOUT, |l, s| on_line(l, s)).await {
         Ok(s) => s,
@@ -812,6 +830,11 @@ pub async fn generate_commit_message(
         let stat = commit_msg::staged_stat(&git, &cwd_key).await;
         let diff_raw = commit_msg::staged_diff(&git, &cwd_key).await;
         let (diff, truncated) = commit_msg::truncate_diff(&diff_raw, commit_msg::DIFF_LIMIT);
+        if cancel.is_canceled() {
+            let _ = on_event.send(CommitEvent::Exit { outcome: CommitOutcome::new(CommitPhase::Canceled) });
+            release(&tasks, &cwd_key, seq);
+            return;
+        }
         if diff.trim().is_empty() {
             let mut outcome = CommitOutcome::new(CommitPhase::Failed);
             outcome.error = Some("暂存区里没有可提交的改动".into());
@@ -822,8 +845,13 @@ pub async fn generate_commit_message(
         }
         let prompt = commit_msg::build_commit_prompt(language.as_deref(), &stat, &diff, truncated);
         let args = commit_msg::generate_args(model.as_deref(), thinking.as_deref(), &cwd_key, &prompt);
-        let child = match commit_msg::spawn_generate(&bin, &args, &cwd_key) {
-            Ok(c) => c,
+        let child = match cancel.spawn_if_active(|| commit_msg::spawn_generate(&bin, &args, &cwd_key)) {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                let _ = on_event.send(CommitEvent::Exit { outcome: CommitOutcome::new(CommitPhase::Canceled) });
+                release(&tasks, &cwd_key, seq);
+                return;
+            }
             Err(e) => {
                 let mut outcome = CommitOutcome::new(CommitPhase::Failed);
                 outcome.error = Some(format!("启动 omp 失败：{e}"));
@@ -982,8 +1010,14 @@ pub async fn start_full_commit(
         let mut outcome = CommitOutcome::new(CommitPhase::Committing);
         let _ = on_event.send(CommitEvent::Phase { phase: CommitPhase::Committing });
         let before = head_sha(&git, &cwd_key).await;
-        let child = match spawn_omp_commit(&bin, &cwd_key, language.as_deref()) {
-            Ok(c) => c,
+        let child = match cancel.spawn_if_active(|| spawn_omp_commit(&bin, &cwd_key, language.as_deref())) {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                outcome.phase = CommitPhase::Canceled;
+                let _ = on_event.send(CommitEvent::Exit { outcome });
+                release(&tasks, &cwd_key, seq);
+                return;
+            }
             Err(e) => {
                 outcome.phase = CommitPhase::Failed;
                 outcome.error = Some(format!("启动 omp commit 失败：{e}"));
