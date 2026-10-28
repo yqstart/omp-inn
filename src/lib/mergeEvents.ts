@@ -108,12 +108,13 @@ export function mergeViewMsgs(cur: ViewMsg[], incoming: IncomingViewMsg[]): View
    }
   }
   // omp 的实时回显（`message_start` role=user，`u-echo-*`）与 Composer 的乐观回显
-  //（`u-local-*`）是同一条消息的两个版本：同文本的本地行被回显接管（换成回显版本），
+  //（`u-local-*`）是同一条消息的两个版本：用发送文本配对，保留用户输入的原文。
   // 不翻倍——否则「发一次」会在消息列渲染成两条相同的气泡。
   if (next.kind === "user" && next.id.startsWith("u-echo-")) {
-   const idx = out.findIndex((x) => x.kind === "user" && x.id.startsWith("u-local-") && x.text === next.text);
+   const idx = out.findIndex((x) => x.kind === "user" && x.id.startsWith("u-local-") && (x.sentText ?? x.text) === next.text);
    if (idx >= 0) {
-    out[idx] = next;
+    const local = out[idx] as Extract<ViewMsg, { kind: "user" }>;
+    out[idx] = { ...next, text: local.text, mentions: local.mentions, sentText: next.text };
     continue;
    }
   }

@@ -14,7 +14,7 @@ import { syncSessionRuntime } from "./useSessionEvents";
 const localPairKey = (m: ViewMsg): string | null =>
  m.kind === "user"
   ? m.id.startsWith("u-local-") || m.id.startsWith("u-echo-")
-   ? `user\u0000${m.text}`
+   ? `user\u0000${m.sentText ?? m.text}`
    : null
   : m.kind === "text"
    ? `text\u0000${m.text}`
@@ -78,7 +78,13 @@ export async function loadEarlierHistory(sid: string, beforeInsert: () => void):
    if (!later) {
     const key = historyPairKey(m);
     const local = key ? localByKey.get(key)?.shift() : undefined;
-    if (local) moved.add(local);
+    if (local) {
+     moved.add(local);
+     const original = byId.get(local);
+     if (m.kind === "user" && original?.kind === "user") {
+      return [{ ...m, text: original.text, mentions: original.mentions, sentText: m.text }];
+     }
+    }
     return [m];
    }
    // 调用和结果可能跨页：以较早的调用位置放合并卡，保留较晚的终态和输出。
@@ -408,7 +414,13 @@ export async function openSessionWithHistory(
    }
    const key = historyPairKey(m);
    const localId = key ? localByKey.get(key)?.shift() : undefined;
-   if (localId) matched.set(localId, index);
+   if (localId) {
+    matched.set(localId, index);
+    const original = byId.get(localId);
+    if (m.kind === "user" && original?.kind === "user") {
+     return { ...m, text: original.text, mentions: original.mentions, sentText: m.text };
+    }
+   }
    return m;
   });
   const earlier: ViewMsg[] = [];
