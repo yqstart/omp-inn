@@ -406,7 +406,7 @@ export async function openSessionWithHistory(
    (page.end < previous.end || (page.before != null && page.before > previous.end));
   if (gap) {
    const remaining = (cur.eventsBySession[realId] ?? [])
-    .filter((m) => previous.records[m.id] !== m)
+    .filter((m) => previous.records[m.id] !== m || (m.kind === "user" && m.awaitingEcho))
     .map((m) => m.kind === "user" ? { ...m, historyBeforeSend: undefined, historyEndBeforeSend: undefined } : m);
    const historyPages = { ...cur.historyPages };
    delete historyPages[realId];
