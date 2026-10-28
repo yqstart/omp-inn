@@ -104,6 +104,8 @@ export async function loadEarlierHistory(sid: string, beforeInsert: () => void):
   const parsedIds = new Set(parsed.map((m) => m.id));
   for (const m of existing) {
    if (state.records[m.id] === m || parsedIds.has(m.id)) continue;
+   // 发送前尚未加载的更早页必然早于本地发送，不能仅因文本相同而配对。
+   if (m.kind === "user" && m.historyBeforeSend != null && before <= m.historyBeforeSend) continue;
    const key = localPairKey(m);
    if (!key) continue;
    const ids = localByKey.get(key) ?? [];

@@ -115,7 +115,7 @@ export function mergeViewMsgs(cur: ViewMsg[], incoming: IncomingViewMsg[]): View
    if (idx >= 0) {
     const local = out[idx] as Extract<ViewMsg, { kind: "user" }>;
     // 历史先到时保留已配对的持久行 id，避免下一次回读再次生成重复行。
-    out[idx] = { ...next, id: local.id.startsWith("u-local-") ? next.id : local.id, text: local.text, mentions: local.mentions, sentText: next.text, awaitingEcho: false };
+    out[idx] = { ...next, id: local.id.startsWith("u-local-") ? next.id : local.id, text: local.text, mentions: local.mentions, sentText: next.text, awaitingEcho: false, historyBeforeSend: local.historyBeforeSend };
     continue;
    }
   }
