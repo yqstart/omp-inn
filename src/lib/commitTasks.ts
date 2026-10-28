@@ -59,7 +59,7 @@ export function openCommitPanel(cwd: string): void {
  * 拉一次变更集并回填（打开面板 / 提交结束后都走它）。
  * 勾选默认 = **已暂存的文件**；一个都没暂存时 = 全部文件（与 Cursor 的口径一致）。
  */
-export async function loadChangeSet(cwd: string): Promise<void> {
+export async function loadChangeSet(cwd: string, preserveTaskResult = false): Promise<void> {
  try {
   const set = await api.getChangeSet(cwd);
   const s = useApp.getState();
@@ -69,6 +69,7 @@ export async function loadChangeSet(cwd: string): Promise<void> {
   const selected = staged.length > 0 ? staged : set.files.map((f) => f.path);
   s.patchCommitTask(cwd, { files: set.files, selected });
  } catch (err) {
+  if (preserveTaskResult) return;
   // 变更集读不到（git 缺失 / 目录没了）：错误留在面板里，不弹窗
   const message = err instanceof Error ? err.message : String(err);
   useApp.getState().patchCommitTask(cwd, { phase: "failed", error: message, hint: null });
@@ -211,7 +212,7 @@ function runCommand(
    // 任务结束：该工作区的 git 快照立刻重拉（行徽章从任务态切回 git 真相）。
    void refreshWorkspaceGitState([cwd]);
    // 提交 / 推送可能改变了工作区与暂存区：重拉一次文件列表（行徽章与面板同一真相）
-   if (opts.reloadOnExit) void loadChangeSet(cwd);
+   if (opts.reloadOnExit || e.outcome.phase === "canceled") void loadChangeSet(cwd, e.outcome.phase === "canceled");
   }
  };
  invoke(channel).catch((err) => {
@@ -225,6 +226,9 @@ function runCommand(
    hint: null,
   });
   void refreshWorkspaceGitState([cwd]);
+  if (err instanceof Error && "cause" in err && err.cause && typeof err.cause === "object" && "code" in err.cause && ["STAGE_FAILED", "STATUS_FAILED", "STAGE_MISMATCH"].includes(String(err.cause.code))) {
+   void loadChangeSet(cwd, true);
+  }
  });
 }
 

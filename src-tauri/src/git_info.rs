@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
 /// 单条 git 查询超时：大仓库 `status` 可能很慢，超时按未知降级，不卡 UI。
-const GIT_TIMEOUT: Duration = Duration::from_secs(4);
+pub(crate) const GIT_TIMEOUT: Duration = Duration::from_secs(4);
 /// 登录 shell 探测超时（-ilc 要跑一遍 rc，单独给宽一点）。
 const SHELL_TIMEOUT: Duration = Duration::from_secs(5);
 /// 跑一条 git 子命令：失败返回 stderr 文本（调用方决定是降级还是当作正常分支缺失）。

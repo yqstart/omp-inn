@@ -25,7 +25,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::commands::{cmd_err, AppState, CmdError};
 use crate::commit_msg;
@@ -68,6 +68,8 @@ impl CancelToken {
     async fn wait(&self) {
         // 先创建通知等待对象再检查标志，避免取消发生在检查和订阅之间时漏掉唤醒。
         let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if self.is_canceled() {
             return;
         }
@@ -556,6 +558,74 @@ pub(crate) fn spawn_git(
     Ok(child)
 }
 
+/// 可取消的暂存写入；已取消时不启动进程，取消后先停止进程树再返回。
+pub(crate) async fn run_git_stage(
+    git: &str,
+    cwd: &str,
+    args: &[&str],
+    cancel: &CancelToken,
+    timeout: Duration,
+) -> Result<(), CmdError> {
+    let mut child = match cancel.spawn_if_active(|| spawn_git(git, cwd, args, None))
+        .map_err(|e| cmd_err("STAGE_FAILED", format!("启动 git 失败：{e}"), None))? {
+        Some(child) => child,
+        None => return Err(stage_canceled()),
+    };
+    let pid = child.id();
+    let mut stdout = child.stdout().take().ok_or_else(|| cmd_err("STAGE_FAILED", "无法读取 git 标准输出".into(), None))?;
+    let mut stderr = child.stderr().take().ok_or_else(|| cmd_err("STAGE_FAILED", "无法读取 git 错误输出".into(), None))?;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    // 两路管道都读到结束，避免提前关闭错误输出影响仍在运行的 git。
+    let result = tokio::select! {
+        result = tokio::time::timeout(timeout, async {
+            tokio::try_join!(child.wait_parent(), stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))
+        }) => Some(result),
+        _ = cancel.wait() => None,
+    };
+    match result {
+        Some(Ok(Ok((status, _, _)))) if status.success() => {
+            if cancel.is_canceled() { Err(stage_canceled()) } else { Ok(()) }
+        }
+        Some(Ok(Ok(_))) => {
+            let detail = String::from_utf8_lossy(&err).trim().to_string();
+            Err(cmd_err("STAGE_FAILED", if detail.is_empty() { "git 命令失败".into() } else { detail }, None))
+        }
+        failure => {
+            let canceled = failure.is_none();
+            let reason = match failure {
+                None => "暂存同步已取消".to_string(),
+                Some(Err(_)) => "暂存同步超时".to_string(),
+                Some(Ok(Err(e))) => format!("暂存同步失败：{e}"),
+                Some(Ok(Ok(_))) => unreachable!(),
+            };
+            let signaled = child.stop_tree(pid);
+            let waited = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::try_join!(child.wait_tree(), stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))
+            }).await;
+            if signaled && matches!(waited, Ok(Ok(_))) {
+                if canceled { return Err(stage_canceled()); }
+                Err(cmd_err("STAGE_FAILED", reason, None))
+            } else {
+                Err(cmd_err("STAGE_FAILED", format!("{reason}；无法确认进程树已退出，暂存状态可能已更改"), None))
+            }
+        }
+    }
+}
+
+pub(crate) fn stage_canceled() -> CmdError {
+    cmd_err("CANCELED", "暂存同步已取消，部分暂存状态可能已更改，请检查后重试".into(), None)
+}
+
+/// 暂存同步期间取消时仍发送终态，让前端刷新实际变更。
+fn finish_selection_error(error: CmdError, on_event: &Channel<CommitEvent>) -> Result<(), CmdError> {
+    if error.code != "CANCELED" { return Err(error); }
+    let mut outcome = CommitOutcome::new(CommitPhase::Canceled);
+    outcome.error = Some(error.message);
+    let _ = on_event.send(CommitEvent::Exit { outcome });
+    Ok(())
+}
+
 // ---------- 任务表小工具（只依赖 `CommitMap`，便于随后台任务一起 move） ----------
 
 fn acquire(tasks: &CommitMap, cwd: &str) -> Result<(u64, Arc<CancelToken>), CmdError> {
@@ -818,9 +888,9 @@ pub async fn generate_commit_message(
     let tasks = state.commit_tasks.clone();
     let (seq, cancel) = acquire(&tasks, &cwd)?;
     // 生成用的是「暂存区里将要提交的那份内容」，所以先按勾选同步暂存区
-    if let Err(e) = git_ops::apply_selection(&git, &cwd, &paths).await {
+    if let Err(e) = git_ops::apply_selection_cancellable(&git, &cwd, &paths, &cancel).await {
         release(&tasks, &cwd, seq);
-        return Err(e);
+        return finish_selection_error(e, &on_event);
     }
     let cwd_key = cwd.clone();
     tokio::spawn(async move {
@@ -932,9 +1002,9 @@ pub async fn commit_selected(
     }
     let tasks = state.commit_tasks.clone();
     let (seq, cancel) = acquire(&tasks, &cwd)?;
-    if let Err(e) = git_ops::apply_selection(&git, &cwd, &paths).await {
+    if let Err(e) = git_ops::apply_selection_cancellable(&git, &cwd, &paths, &cancel).await {
         release(&tasks, &cwd, seq);
-        return Err(e);
+        return finish_selection_error(e, &on_event);
     }
     let cwd_key = cwd.clone();
     tokio::spawn(async move {
@@ -1001,9 +1071,9 @@ pub async fn start_full_commit(
     let bin = resolve_omp(&state)?;
     let tasks = state.commit_tasks.clone();
     let (seq, cancel) = acquire(&tasks, &cwd)?;
-    if let Err(e) = git_ops::apply_selection(&git, &cwd, &paths).await {
+    if let Err(e) = git_ops::apply_selection_cancellable(&git, &cwd, &paths, &cancel).await {
         release(&tasks, &cwd, seq);
-        return Err(e);
+        return finish_selection_error(e, &on_event);
     }
     let cwd_key = cwd.clone();
     tokio::spawn(async move {

@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::commands::{cmd_err, CmdError};
-use crate::git_info::{dir_exists, git_bin, run_git, run_git_timeout};
+use crate::git_info::{dir_exists, git_bin, run_git, run_git_timeout, GIT_TIMEOUT};
 use crate::project_files::parse_ls_files_z;
 
 /// 变更集里一个文件的上限保护：超大仓库不把整表塞给前端（够用且不卡界面）。
@@ -402,7 +402,16 @@ async fn ls_files_visible(git: &str, root: &str, paths: &[String]) -> Result<Vec
 /// 只做**子集**校验：选中但没有改动的文件不会出现在暂存区，等值校验会误报。
 /// 勾选集是根基准（来自变更集），git 调用统一在仓库根下跑；已无内容可暂的路径
 /// （已暂存的删除条目 / 被删的未跟踪文件 / 新被忽略的文件）先剔除，不让整批 add 失败。
+#[cfg(test)]
 pub(crate) async fn apply_selection(git: &str, cwd: &str, paths: &[String]) -> Result<(), CmdError> {
+    apply_selection_inner(git, cwd, paths, None).await
+}
+
+pub(crate) async fn apply_selection_cancellable(git: &str, cwd: &str, paths: &[String], cancel: &crate::git_commit::CancelToken) -> Result<(), CmdError> {
+    apply_selection_inner(git, cwd, paths, Some(cancel)).await
+}
+
+async fn apply_selection_inner(git: &str, cwd: &str, paths: &[String], cancel: Option<&crate::git_commit::CancelToken>) -> Result<(), CmdError> {
     // 路径首尾的空白也是文件名的一部分，不能把勾选变成另一个文件。
     let selected: Vec<String> = paths.iter().filter(|p| !p.is_empty()).cloned().collect();
     if selected.is_empty() {
@@ -419,12 +428,16 @@ pub(crate) async fn apply_selection(git: &str, cwd: &str, paths: &[String]) -> R
     let staged = staged_paths(git, &root)
         .await
         .map_err(|e| cmd_err("STATUS_FAILED", e, None))?;
+    if cancel.is_some_and(|c| c.is_canceled()) { return Err(crate::git_commit::stage_canceled()); }
     let (to_add, to_unstage) = stage_plan(&selected, &staged);
     if !to_unstage.is_empty() {
         let has_head = run_git(git, &root, &["rev-parse", "--verify", "-q", "HEAD"]).await.is_ok();
         let args = unstage_args(has_head, &to_unstage);
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        run_git_timeout(git, &root, &refs, SLOW).await.map_err(|e| cmd_err("STAGE_FAILED", e, None))?;
+        match cancel {
+            Some(c) => crate::git_commit::run_git_stage(git, &root, &refs, c, SLOW).await?,
+            None => { run_git_timeout(git, &root, &refs, SLOW).await.map_err(|e| cmd_err("STAGE_FAILED", e, None))?; }
+        }
     }
     if !to_add.is_empty() {
         // 探测失败不拦路（退回旧行为）：照旧 add，错误由 git 原文上报
@@ -435,7 +448,10 @@ pub(crate) async fn apply_selection(git: &str, cwd: &str, paths: &[String]) -> R
         if !addable.is_empty() {
             let args = add_args(&addable);
             let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            run_git(git, &root, &refs).await.map_err(|e| cmd_err("STAGE_FAILED", e, None))?;
+            match cancel {
+                Some(c) => crate::git_commit::run_git_stage(git, &root, &refs, c, GIT_TIMEOUT).await?,
+                None => { run_git(git, &root, &refs).await.map_err(|e| cmd_err("STAGE_FAILED", e, None))?; }
+            }
         }
     }
     // 复查：暂存区不能出现勾选之外的文件（那是「提交了没勾的东西」，必须挡住）；
@@ -443,6 +459,7 @@ pub(crate) async fn apply_selection(git: &str, cwd: &str, paths: &[String]) -> R
     let after = staged_paths(git, &root)
         .await
         .map_err(|e| cmd_err("STATUS_FAILED", e, None))?;
+    if cancel.is_some_and(|c| c.is_canceled()) { return Err(crate::git_commit::stage_canceled()); }
     if let Some(extra) = after.iter().find(|p| !selected.iter().any(|s| selection_covers(s, p))) {
         return Err(cmd_err(
             "STAGE_MISMATCH",
