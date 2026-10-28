@@ -13,7 +13,7 @@ import { normalizeCommands } from "./slashCommands";
 import { forgetSessionLiveStats } from "./sessionLiveStats";
 import { scheduleWorkspaceGitRefresh } from "./commitTasks";
 import { resolveThinking } from "./thinking";
-import { createStreamBuffer, mergeViewMsgs, type IncomingViewMsg } from "./mergeEvents";
+import { createStreamBuffer, mergeViewMsgs, type FrameBuffer, type IncomingViewMsg } from "./mergeEvents";
 import { transferEditorDraft } from "./draftTransfer";
 
 /**
@@ -113,6 +113,11 @@ function streamingArgsPreview(partialArgs: string): string {
 }
 
 const folds = new Map<string, Fold>();
+const sessionBuffers = new Map<string, FrameBuffer>();
+/** 历史回读合并前，先提交当前会话已收到的实时帧。 */
+export function flushSessionEvents(sid: string) {
+ sessionBuffers.get(sid)?.flush();
+}
 // 消息可能在同一毫秒到达；序号在折叠态回收后也不能重用。
 let userEchoSequence = 0;
 /** 单测隔离用：清掉按会话累积的流式折叠态。 */
@@ -955,6 +960,7 @@ export function useSessionEvents() {
    const cur = st.eventsBySession[sid] ?? [];
    st.set({ eventsBySession: { ...st.eventsBySession, [sid]: mergeViewMsgs(cur, batch) } });
   });
+  sessionBuffers.set(sid, buffer);
   (async () => {
    const o1 = await listen<Record<string, unknown>>(IPC.chatEvent(sid), (e) => {
     const p = e.payload;
@@ -1071,6 +1077,7 @@ export function useSessionEvents() {
   return () => {
    disposed = true;
    readySessionListeners.delete(sid);
+   if (sessionBuffers.get(sid) === buffer) sessionBuffers.delete(sid);
    // 未 flush 的帧随会话切走一起丢弃（切回时 get_history 全量重拉，不丢内容）
    buffer.dispose();
    off1?.();

@@ -204,6 +204,8 @@ export function coalesceStream(pending: IncomingViewMsg[], incoming: IncomingVie
 export type FrameBuffer = {
  /** 攒入一批帧（内部先折叠同 id 版本），并安排在下一个渲染帧 flush。 */
  push(msgs: IncomingViewMsg[]): void;
+ /** 立即处理已收到的帧，供历史回读合并前使用。 */
+ flush(): void;
  /** 会话切走 / 卸载：丢弃未 flush 的帧（内容真相在 jsonl，切回时 `get_history` 重拉）。 */
  dispose(): void;
 };
@@ -218,12 +220,15 @@ export type FrameBuffer = {
 export function createStreamBuffer(flush: (msgs: IncomingViewMsg[]) => void): FrameBuffer {
  let pending: IncomingViewMsg[] = [];
  let scheduled = false;
- const run = () => {
-  scheduled = false;
+ const flushPending = () => {
   if (pending.length === 0) return;
   const batch = pending;
   pending = [];
   flush(batch);
+ };
+ const run = () => {
+  scheduled = false;
+  flushPending();
  };
  return {
   push(msgs) {
@@ -234,6 +239,7 @@ export function createStreamBuffer(flush: (msgs: IncomingViewMsg[]) => void): Fr
     requestAnimationFrame(run);
    }
   },
+  flush: flushPending,
   dispose() {
    // 已调度的 rAF 留着无妨：run 见 pending 为空直接返回
    pending = [];

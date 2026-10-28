@@ -5,7 +5,7 @@ import { fmt, TEXT } from "./locale";
 import { appendLocalNote } from "./localNote";
 import { viewMsgsFromJsonlLines } from "./viewmsg";
 import { mergeToolCard } from "./mergeEvents";
-import { syncSessionRuntime, waitForSessionListeners } from "./useSessionEvents";
+import { flushSessionEvents, syncSessionRuntime, waitForSessionListeners } from "./useSessionEvents";
 import { isRemoteClient } from "@shared/remote";
 
 /** 发送前恢复进程；身份发生漂移时先切换视图并等事件监听完成。 */
@@ -78,6 +78,7 @@ export async function loadEarlierHistory(sid: string, beforeInsert: () => void):
  st.set({ historyPages: { ...st.historyPages, [sid]: loadingState } });
  try {
   const page = await api.getHistory(sid, before);
+  flushSessionEvents(sid);
   const latest = useApp.getState();
   const state = latest.historyPages[sid];
   if (state !== loadingState) return;
@@ -403,6 +404,7 @@ export async function openSessionWithHistory(
  }
  try {
   const page = await api.getHistory(realId);
+  flushSessionEvents(realId);
   let cur = useApp.getState();
   const previous = cur.historyPages[realId];
   // 新旧文件区间没有交集时，旧游标无法覆盖中间的记录；丢掉旧历史快照并从最新页重建。
