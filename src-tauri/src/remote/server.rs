@@ -172,6 +172,10 @@ async fn pair(
         .map(|s| s.chars().take(200).collect::<String>());
     match ctx.manager.pair(&body.secret, &name, Some(&ip), ua.as_deref(), existing.as_deref()) {
         Ok((token, device)) => {
+            // 沿用设备身份时，旧令牌已失效；在新令牌交给客户端前断开旧连接。
+            if existing.as_deref() == Some(device.id.as_str()) {
+                ctx.manager.hub().revoke_device(&device.id);
+            }
             let secure = auth::is_secure(&headers, peer);
             let cookie = auth::set_cookie(&token, secure);
             let mut res = Json(json!({"device": device, "protocol": 1})).into_response();
