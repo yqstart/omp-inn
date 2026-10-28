@@ -68,6 +68,19 @@ const historyPairKey = (m: ViewMsg): string | null =>
     ? `thinking\u0000${m.text}`
     : null;
 
+/** 保留历史行身份的同时，接住之后到达的同一实时消息收尾帧。 */
+function retainLiveId(history: ViewMsg, live: ViewMsg): ViewMsg {
+ if (history.kind === "text" && live.kind === "text") {
+  const liveId = live.liveId ?? (live.id.startsWith("t:") ? undefined : live.id);
+  return liveId ? { ...history, liveId } : history;
+ }
+ if (history.kind === "thinking" && live.kind === "thinking") {
+  const liveId = live.liveId ?? (live.id.startsWith("th:") ? undefined : live.id);
+  return liveId ? { ...history, liveId } : history;
+ }
+ return history;
+}
+
 /** 向前读取一页，并把尚未出现的历史行放在现有消息之前。 */
 export async function loadEarlierHistory(sid: string, beforeInsert: () => void): Promise<void> {
  const st = useApp.getState();
@@ -124,6 +137,7 @@ export async function loadEarlierHistory(sid: string, beforeInsert: () => void):
      if (m.kind === "user" && original?.kind === "user") {
       return [{ ...m, text: original.text, mentions: original.mentions, sentText: m.text, awaitingEcho: original.awaitingEcho }];
      }
+     if (original) return [retainLiveId(m, original)];
     }
     return [m];
    }
@@ -478,6 +492,7 @@ export async function openSessionWithHistory(
     if (m.kind === "user" && original?.kind === "user") {
      return { ...m, text: original.text, mentions: original.mentions, sentText: m.text, awaitingEcho: original.awaitingEcho };
     }
+    if (original) return retainLiveId(m, original);
    }
    return m;
   });

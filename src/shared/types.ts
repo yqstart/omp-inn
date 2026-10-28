@@ -1306,8 +1306,8 @@ type ViewMsgBase =
   /** 因体积过大被刻意省略的图片数（历史回放不做无上限 base64 常驻）。 */
   imagesOmitted?: number;
  }
- | { kind: "text"; id: string; seq: number; text: string; complete: boolean }
- | { kind: "thinking"; id: string; text: string; seconds: number; complete: boolean }
+ | { kind: "text"; id: string; seq: number; text: string; complete: boolean; liveId?: string }
+ | { kind: "thinking"; id: string; text: string; seconds: number; complete: boolean; liveId?: string }
  | {
   kind: "tool";
   id: string;

@@ -81,7 +81,7 @@ export function mergeViewMsgs(cur: ViewMsg[], incoming: IncomingViewMsg[]): View
    }
   }
   if (raw.__append && next.kind === "text") {
-   const idx = out.findIndex((x) => x.kind === "text" && x.id === next.id);
+   const idx = out.findIndex((x) => x.kind === "text" && (x.id === next.id || x.liveId === next.id));
    // 无内容文本块（模型在思考与工具调用之间吐的孤立标点）：完结时**整行不生**，已经由
    // 流式增量建出来的就地撤掉——否则消息列里留一格空白加一个「.」（判定见 `textHasContent`）。
    if (next.complete && !textHasContent(next.text)) {
@@ -94,16 +94,21 @@ export function mergeViewMsgs(cur: ViewMsg[], incoming: IncomingViewMsg[]): View
     const prev = out[idx] as Extract<ViewMsg, { kind: "text" }>;
     // 已完成的行只接受完成态的更新（`text_end` / `message_end` 的收尾；迟到的增量帧
     // 不许把写完的段落重开——那会在流尾留下一个永远的打字机光标）。
-    if (!prev.complete || next.complete) out[idx] = next;
+    if (!prev.complete || next.complete) {
+     out[idx] = prev.liveId === next.id ? { ...next, id: prev.id, liveId: prev.liveId, seq: prev.seq, at: prev.at ?? next.at } : next;
+    }
    }
    continue;
   }
   // 思考块：流式增量与完成帧共用同一个 id（`${sid}:${contentIndex}`），按 id 原位覆盖
   //（complete:false 「思考中…」→ true 「思考 · N 秒」），整段思考始终只有一块。
   if (next.kind === "thinking") {
-   const idx = out.findIndex((x) => x.kind === "thinking" && x.id === next.id);
+   const idx = out.findIndex((x) => x.kind === "thinking" && (x.id === next.id || x.liveId === next.id));
    if (idx >= 0) {
-    out[idx] = next;
+    const prev = out[idx] as Extract<ViewMsg, { kind: "thinking" }>;
+    if (!prev.complete || next.complete) {
+     out[idx] = prev.liveId === next.id ? { ...next, id: prev.id, liveId: prev.liveId, at: prev.at ?? next.at } : next;
+    }
     continue;
    }
   }
