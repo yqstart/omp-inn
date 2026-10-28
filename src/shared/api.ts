@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { IPC } from "./ipc";
 import { isRemoteClient, remoteInvoke } from "./remote";
+import type { ImageBlock } from "./types";
 import type { BtwRecord, ChangeSet, CheckoutView, CommitEvent, ConstraintFile, ConstraintsView, ConstraintKind, ContextBreakdown, DirListing, DiscoveredModel, FallbackChainsInfo, GitCommitDetail, GitCommitDiff, GitGraphPage, GitInfo, HealthInfo, ImageAttachment, MemoryFileContent, MemoryProjectView, ModelCatalog, ModelRolesInfo, ModelsConfigFile, OmpInfo, OmpSetting, OmpSettingsCatalog, OmpUpdateEvent, OmpUpdateStatus, Overlay, PathCheck, PathSearch, PluginDoctorFinding, PluginFeatures, PluginsView, ProjectFiles, ProjectView, ProviderLoginStatus, ProviderPurgeInfo, ProviderUsage, ProviderView, PullOutcome, RemotePairing, RemoteStatus, RemoteTailscale, ScriptCatalog, SessionLiveStats, SessionPage, SessionRuntime, SessionStats, SessionView, SkillFileContent, SkillsView, SystemPermissionKind, SystemPermissions, StorageCleanPlan, StorageCleanResult, StoragePreview, StorageStats, TerminalEvent, TerminalSpawnOpts, TitlePromptLang, TitlePromptOutcome, UsageStats, WorkspaceGitState, WorkspaceView } from "./types";
 
 /**
@@ -216,7 +217,7 @@ export const api = {
   * 返回图片（若有）供编辑回草稿；超传输上限时 `imagesDropped`。
   */
  removeQueuedMessage: (id: string, message: string, queue: "steering" | "followUp") =>
-  call<{ removed: boolean; images?: ImageAttachment[]; imagesDropped?: boolean }>(IPC.removeQueuedMessage, {
+  call<{ removed: boolean; images?: ImageBlock[]; imagesDropped?: boolean }>(IPC.removeQueuedMessage, {
    id,
    message,
    queue,
@@ -230,8 +231,8 @@ export const api = {
   */
  abortAndRestoreQueue: (id: string) =>
   call<{
-   steering: { text: string; images?: ImageAttachment[] }[];
-   followUp: { text: string; images?: ImageAttachment[] }[];
+   steering: { text: string; images?: ImageBlock[] }[];
+   followUp: { text: string; images?: ImageBlock[] }[];
    imagesDropped?: boolean;
    truncated?: boolean;
   }>(IPC.abortAndRestoreQueue, { id }),

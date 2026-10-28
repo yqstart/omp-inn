@@ -955,6 +955,7 @@ export function Composer() {
    const restored = restoreImageOrder(back, images);
    const cur = currentDraft(sid);
    persistDraft(sid, cur.trim() ? `${cur}\n\n${restored}` : restored);
+   if (r.imagesDropped) setAttachError(t.queueImagesDropped);
    editorRef.current?.focus();
   } catch {
    // 失败（已被投递 / 已消费）：队列快照随后自行收敛，不弹错
@@ -990,6 +991,9 @@ export function Composer() {
  const abortAndRestore = async (sid: string) => {
   try {
    const r = await api.abortAndRestoreQueue(sid);
+   if (r.imagesDropped || r.truncated) {
+    setAttachError(r.imagesDropped && r.truncated ? t.queueRestoreIncomplete : r.imagesDropped ? t.queueImagesDropped : t.queueRestoreTruncated);
+   }
    const items = [...r.steering, ...r.followUp];
    if (items.length > 0) {
     const text = items
