@@ -707,6 +707,7 @@ export function forgetSession(sid: string): void {
   !(sid in st.planDismissedBySession) &&
   !(sid in st.attachmentsBySession) &&
   !(sid in st.queuedBySession) &&
+  !(sid in st.queueRestoreWarnings) &&
   !(sid in st.subagentsBySession)
  ) {
   return;
@@ -719,6 +720,7 @@ export function forgetSession(sid: string): void {
  const planDismissed = { ...st.planDismissedBySession };
  const atts = { ...st.attachmentsBySession };
  const queued = { ...st.queuedBySession };
+ const queueWarnings = { ...st.queueRestoreWarnings };
  const subs = { ...st.subagentsBySession };
  delete events[sid];
  delete historyPages[sid];
@@ -728,6 +730,7 @@ export function forgetSession(sid: string): void {
  delete planDismissed[sid];
  delete atts[sid];
  delete queued[sid];
+ delete queueWarnings[sid];
  delete subs[sid];
  st.set({
   eventsBySession: events,
@@ -738,6 +741,7 @@ export function forgetSession(sid: string): void {
   planDismissedBySession: planDismissed,
   attachmentsBySession: atts,
   queuedBySession: queued,
+  queueRestoreWarnings: queueWarnings,
   subagentsBySession: subs,
   // 旁问面板正开着这个会话时一并关掉（记录属于会话，不跨会话残留）
   ...(st.btw.sessionId === sid ? { btw: { open: false, sessionId: null, records: [], busyRecordId: null, draft: "", error: null } } : {}),

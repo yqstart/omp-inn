@@ -230,6 +230,7 @@ export function Composer() {
    .join("\n");
  }, [checks, mentionKey, mentions]);
  const [attachError, setAttachError] = useState<string | null>(null);
+ const queueRestoreWarning = useApp((s) => activeSessionId ? s.queueRestoreWarnings[activeSessionId] : undefined);
  const [recoveredDraft, setRecoveredDraft] = useState(() => {
   try { return localStorage.getItem(NEW_DRAFT_RECOVERY) ?? ""; } catch { return ""; }
  });
@@ -955,7 +956,7 @@ export function Composer() {
    const restored = restoreImageOrder(back, images);
    const cur = currentDraft(sid);
    persistDraft(sid, cur.trim() ? `${cur}\n\n${restored}` : restored);
-   if (r.imagesDropped) setAttachError(t.queueImagesDropped);
+   if (r.imagesDropped) useApp.getState().addQueueRestoreWarning(sid, true, false);
    editorRef.current?.focus();
   } catch {
    // 失败（已被投递 / 已消费）：队列快照随后自行收敛，不弹错
@@ -992,7 +993,7 @@ export function Composer() {
   try {
    const r = await api.abortAndRestoreQueue(sid);
    if (r.imagesDropped || r.truncated) {
-    setAttachError(r.imagesDropped && r.truncated ? t.queueRestoreIncomplete : r.imagesDropped ? t.queueImagesDropped : t.queueRestoreTruncated);
+    useApp.getState().addQueueRestoreWarning(sid, !!r.imagesDropped, !!r.truncated);
    }
    const items = [...r.steering, ...r.followUp];
    if (items.length > 0) {
@@ -1387,6 +1388,14 @@ export function Composer() {
      </div>
     )}
     {attachError && <div className="px-4 pt-2 text-[13px] text-danger">{attachError}</div>}
+    {queueRestoreWarning && activeSessionId && (
+     <div className="flex items-start gap-2 px-4 pt-2 text-[13px] text-danger" role="alert">
+      <span className="flex-1">{queueRestoreWarning.imagesDropped && queueRestoreWarning.truncated ? t.queueRestoreIncomplete : queueRestoreWarning.imagesDropped ? t.queueImagesDropped : t.queueRestoreTruncated}</span>
+      <button type="button" aria-label={t.close} onClick={() => useApp.getState().clearQueueRestoreWarning(activeSessionId)}>
+       <X size={14} aria-hidden />
+      </button>
+     </div>
+    )}
     {recoveredDraft && !activeSessionId && (
      <button type="button" className="mx-4 mt-2 text-left text-[13px] text-warn" onClick={() => {
       const current = currentDraft(NEW_DRAFT);

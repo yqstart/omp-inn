@@ -135,6 +135,10 @@ type AppState = {
  attachmentsBySession: Record<string, ImageAttachment[]>;
  /** 待发队列真值（V40）：`queue_update` 帧与运行时回读的落点（omp 侧是权威，可撤回 / 提升）。 */
  queuedBySession: Record<string, QueuedMessages>;
+ /** 队列撤回后无法恢复的内容提示，按会话保留到用户关闭。 */
+ queueRestoreWarnings: Record<string, { imagesDropped: boolean; truncated: boolean }>;
+ addQueueRestoreWarning: (sid: string, imagesDropped: boolean, truncated: boolean) => void;
+ clearQueueRestoreWarning: (sid: string) => void;
  /** 子代理注册表（V41）：`subagent_lifecycle` 帧与打开会话时 `get_subagents` 补拉的落点。 */
  subagentsBySession: Record<string, SubAgentInfo[]>;
  /** 当前会话的模型 selector（`provider/id`；工具行选择器显示与用量入口用）。 */
@@ -685,6 +689,7 @@ export const useApp = create<AppState>((set, get) => ({
  drafts: {},
  attachmentsBySession: {},
  queuedBySession: {},
+ queueRestoreWarnings: {},
  subagentsBySession: {},
  navStack: [],
  navIdx: -1,
@@ -779,6 +784,16 @@ export const useApp = create<AppState>((set, get) => ({
   set((s) => (sid ? { attachmentsBySession: { ...s.attachmentsBySession, [sid]: [] } } : {})),
  queuedOf: (sid) => (sid ? get().queuedBySession[sid] ?? EMPTY_QUEUE : EMPTY_QUEUE),
  applyQueue: (sid, q) => set((s) => ({ queuedBySession: { ...s.queuedBySession, [sid]: q } })),
+ addQueueRestoreWarning: (sid, imagesDropped, truncated) => set((s) => {
+  const old = s.queueRestoreWarnings[sid];
+  return { queueRestoreWarnings: { ...s.queueRestoreWarnings, [sid]: { imagesDropped: imagesDropped || !!old?.imagesDropped, truncated: truncated || !!old?.truncated } } };
+ }),
+ clearQueueRestoreWarning: (sid) => set((s) => {
+  if (!(sid in s.queueRestoreWarnings)) return s;
+  const warnings = { ...s.queueRestoreWarnings };
+  delete warnings[sid];
+  return { queueRestoreWarnings: warnings };
+ }),
  applyPlans: (sid, phases) =>
   set((s) => {
    const sig = JSON.stringify(phases);
