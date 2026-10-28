@@ -50,6 +50,15 @@ export function rewriteMentions(text: string, rewrite: (token: string) => string
     if (!token) return whole;
     const next = rewrite(token);
     if (next === null || next === token) return whole;
-    return `@${/[\s"]/.test(next) ? `"${next}"` : next}`;
+    const quoted = /[\s"]/.test(next);
+    const replacement = quoted ? `"${next}"` : next;
+    if (plain !== undefined) {
+      const start = plain.indexOf(token);
+      const prefix = plain.slice(0, start);
+      const suffix = plain.slice(start + token.length);
+      // 引号必须紧跟 @ 才能被解析；有前置括号且路径带空格时，将括号放到 @ 前。
+      return quoted && prefix ? `${prefix}@${replacement}${suffix}` : `@${prefix}${replacement}${suffix}`;
+    }
+    return `@${replacement}`;
   });
 }
