@@ -88,6 +88,12 @@ function retainLiveId(history: ViewMsg, live: ViewMsg): ViewMsg {
  return history;
 }
 
+/** 历史图片可能因体积限制省略；配对时保留已有的更完整图片。 */
+function mergeHistoryUser(history: Extract<ViewMsg, { kind: "user" }>, local: Extract<ViewMsg, { kind: "user" }>): ViewMsg {
+ const keepLocalImages = (local.images?.length ?? 0) > (history.images?.length ?? 0);
+ return { ...history, text: local.text, mentions: local.mentions, sentText: history.text, awaitingEcho: local.awaitingEcho, ...(keepLocalImages ? { images: local.images, imagesOmitted: local.imagesOmitted } : {}) };
+}
+
 /** 向前读取一页，并把尚未出现的历史行放在现有消息之前。 */
 export async function loadEarlierHistory(sid: string, beforeInsert: () => void): Promise<void> {
  const st = useApp.getState();
@@ -142,7 +148,7 @@ export async function loadEarlierHistory(sid: string, beforeInsert: () => void):
      moved.add(local);
      const original = byId.get(local);
      if (m.kind === "user" && original?.kind === "user") {
-      return [{ ...m, text: original.text, mentions: original.mentions, sentText: m.text, awaitingEcho: original.awaitingEcho }];
+      return [mergeHistoryUser(m, original)];
      }
      if (original) return [retainLiveId(m, original)];
     }
@@ -497,7 +503,7 @@ export async function openSessionWithHistory(
     matched.set(localId, index);
     const original = byId.get(localId);
     if (m.kind === "user" && original?.kind === "user") {
-     return { ...m, text: original.text, mentions: original.mentions, sentText: m.text, awaitingEcho: original.awaitingEcho };
+     return mergeHistoryUser(m, original);
     }
     if (original) return retainLiveId(m, original);
    }

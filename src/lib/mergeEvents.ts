@@ -120,9 +120,9 @@ export function mergeViewMsgs(cur: ViewMsg[], incoming: IncomingViewMsg[]): View
    if (idx >= 0) {
     const local = out[idx] as Extract<ViewMsg, { kind: "user" }>;
     // 历史先到时保留已配对的持久行 id，避免下一次回读再次生成重复行。
-    // 历史的 blob 引用可按需读取；实时大图可能被上限省略，不能覆盖更完整的历史图片。
-    const keepHistoryImages = local.id.startsWith("u:") && (local.images?.length ?? 0) > (next.images?.length ?? 0);
-    out[idx] = { ...next, id: local.id.startsWith("u-local-") ? next.id : local.id, text: local.text, mentions: local.mentions, sentText: next.text, awaitingEcho: false, historyBeforeSend: local.historyBeforeSend, historyEndBeforeSend: local.historyEndBeforeSend, historyOffset: local.historyOffset, ...(keepHistoryImages ? { images: local.images, imagesOmitted: local.imagesOmitted } : {}) };
+    // 实时大图可能被上限省略，不能覆盖更完整的本地图片或历史图片引用。
+    const keepLocalImages = (local.images?.length ?? 0) > (next.images?.length ?? 0);
+    out[idx] = { ...next, id: local.id.startsWith("u-local-") ? next.id : local.id, text: local.text, mentions: local.mentions, sentText: next.text, awaitingEcho: false, historyBeforeSend: local.historyBeforeSend, historyEndBeforeSend: local.historyEndBeforeSend, historyOffset: local.historyOffset, ...(keepLocalImages ? { images: local.images, imagesOmitted: local.imagesOmitted } : {}) };
     continue;
    }
   }
