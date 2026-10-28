@@ -8,9 +8,16 @@ import { mergeToolCard } from "./mergeEvents";
 import { flushSessionEvents, syncSessionRuntime, waitForSessionListeners } from "./useSessionEvents";
 import { isRemoteClient } from "@shared/remote";
 
+/** 只识别后端明确未投递且返回完整分叉身份的错误。 */
+export function movedSessionId(error: unknown): string | null {
+ const raw = error instanceof Error && "cause" in error && error.cause && typeof error.cause === "object" ? error.cause : error;
+ if (!raw || typeof raw !== "object" || !("code" in raw) || raw.code !== "SESSION_MOVED" || !("hint" in raw) || typeof raw.hint !== "string") return null;
+ return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw.hint) ? raw.hint : null;
+}
+
 /** 发送前恢复进程；身份发生漂移时先切换视图并等事件监听完成。 */
-export async function prepareSessionForSend(sid: string, moved: (id: string) => void): Promise<string> {
- const opened = await api.openSession(sid);
+export async function prepareSessionForSend(sid: string, moved: (id: string) => void, preferredId?: string): Promise<string> {
+ const opened = await api.openSession(preferredId ?? sid);
  if (opened.id === sid) {
   if (useApp.getState().activeSessionId === sid) await waitForSessionListeners(sid);
   return sid;

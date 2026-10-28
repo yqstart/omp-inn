@@ -19,7 +19,7 @@ import { extractMentions, rewriteMentions } from "../../lib/mentions";
 import { cycleSessionApproval } from "../../lib/sessionApproval";
 import { loadHistory, pushHistory } from "../../lib/promptHistory";
 import { commandInsert, filterCommands, isCompleteCommand, normalizeCommands, SKILL_PREFIX, type SlashCandidate } from "../../lib/slashCommands";
-import { createChatIn, prepareSessionForSend, refreshTitleAfterFirstSend } from "../../lib/sessionOpen";
+import { createChatIn, movedSessionId, prepareSessionForSend, refreshTitleAfterFirstSend } from "../../lib/sessionOpen";
 import { resolveNewChatCheckout } from "../../lib/checkouts";
 import { useText } from "../../lib/useText";
 import { ProjectPicker } from "../pickers/ProjectPicker";
@@ -857,6 +857,18 @@ export function Composer() {
   movePendingDraft(from, to);
  };
 
+ /** 仅在后端确认未投递且已分叉时，切到真实身份并保留草稿供用户重发。 */
+ const followMovedSend = async (sid: string, error: unknown, moved: (id: string) => void): Promise<unknown> => {
+  const id = movedSessionId(error);
+  if (!id || id === sid) return error;
+  try {
+   await prepareSessionForSend(sid, moved, id);
+   return new Error(t.sessionMovedRetry);
+  } catch (e) {
+   return e;
+  }
+ };
+
  const sendQueued = async (mode: "steer" | "follow_up") => {
   const sid = activeSessionId;
   const st = useApp.getState();
@@ -875,8 +887,13 @@ export function Composer() {
     pushHistory(target, cmdText);
     resetHistory();
    } catch (e) {
+    const failure = await followMovedSend(target, e, (id) => {
+     if (target !== sid) endSend(target);
+     lockMovedSession(target, id);
+     target = id;
+    });
     restoreDraft(target, raw, sentImages);
-    setAttachError(e instanceof Error ? e.message : String(e));
+    setAttachError(failure instanceof Error ? failure.message : String(failure));
    } finally {
     if (target !== sid) endSend(target);
     endSend(sid);
@@ -1119,8 +1136,6 @@ export function Composer() {
    }
   } catch (e) {
    // 发失败就把草稿与附件还回去、不留幽灵消息，不让用户重打一遍
-   restoreDraft(sid, raw, sentImages);
-   setAttachError(e instanceof Error ? e.message : String(e));
    const st = useApp.getState();
    st.set({
     eventsBySession: {
@@ -1128,6 +1143,13 @@ export function Composer() {
      [sid]: (st.eventsBySession[sid] ?? []).filter((m) => m.id !== optimisticId),
     },
    });
+   const failure = await followMovedSend(target, e, (id) => {
+    if (target !== sourceSid) endSend(target);
+    lockMovedSession(target, id);
+    target = id;
+   });
+   restoreDraft(target, raw, sentImages);
+   setAttachError(failure instanceof Error ? failure.message : String(failure));
   } finally {
    if (target !== sourceSid) endSend(target);
   }
@@ -1232,8 +1254,13 @@ export function Composer() {
     pushHistory(target, cmdText);
     resetHistory();
    } catch (e) {
+    const failure = await followMovedSend(target, e, (id) => {
+     if (target !== sid) endSend(target);
+     lockMovedSession(target, id);
+     target = id;
+    });
     restoreDraft(target, raw, []);
-    setAttachError(e instanceof Error ? e.message : String(e));
+    setAttachError(failure instanceof Error ? failure.message : String(failure));
    } finally {
     if (target !== sid) endSend(target);
     endSend(sid);

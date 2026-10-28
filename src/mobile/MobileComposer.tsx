@@ -4,7 +4,7 @@ import { api } from "@shared/api";
 import type { ImageAttachment } from "@shared/types";
 import { ATTACH_MAX_BYTES } from "../lib/attachments";
 import { restoreImageOrder, withImageOrderNote } from "../lib/imageRefs";
-import { prepareSessionForSend, refreshTitleAfterFirstSend } from "../lib/sessionOpen";
+import { movedSessionId, prepareSessionForSend, refreshTitleAfterFirstSend } from "../lib/sessionOpen";
 import { useText } from "../lib/useText";
 import { useApp } from "../stores/app";
 
@@ -111,31 +111,31 @@ export function MobileComposer({
   initial.clearAttachments(sid);
   let target = sid;
   let optimisticId: string | undefined;
-  const movePending = (id: string) => {
+  const movePending = (from: string, id: string) => {
    target = id;
    const st = useApp.getState();
-   const pending = st.draftOf(sid);
-   const images = st.attachmentsOf(sid);
+   const pending = st.draftOf(from);
+   const images = st.attachmentsOf(from);
    const occupied = new Set(st.attachmentsOf(id).map((image) => image.slot));
    const assigned = st.addAttachments(id, images.map((image) => occupied.has(image.slot) ? { ...image, slot: undefined } : image));
    const mapped = images.length ? restoreImageOrder(withImageOrderNote(pending, images), assigned) : pending;
    const existing = st.draftOf(id);
    st.setDraft(id, existing.trim() && mapped.trim() ? `${existing}\n\n${mapped}` : existing + mapped);
-   st.setDraft(sid, "");
-   st.clearAttachments(sid);
+   st.setDraft(from, "");
+   st.clearAttachments(from);
   };
   // 正文引用 `#N` 且带图时补附件顺序注记（只进 wire text；界面 / 标题仍用原文）
   const wireText = withImageOrderNote(text, attachments);
   try {
    if (text.startsWith("/") && attachments.length === 0) {
-    target = await prepareSessionForSend(sid, movePending);
+    target = await prepareSessionForSend(sid, (id) => movePending(sid, id));
     await api.runSlash(target, text);
    } else if (kind === "queue") {
     await api.followUpMessage(sid, wireText, attachments.length ? attachments : undefined);
    } else if (kind === "steer") {
     await api.steerMessage(sid, wireText, attachments.length ? attachments : undefined);
    } else {
-    target = await prepareSessionForSend(sid, movePending);
+    target = await prepareSessionForSend(sid, (id) => movePending(sid, id));
     const st = useApp.getState();
     optimisticId = `u-local-mobile-${++localMessageSequence}`;
     st.appendEvents(target, [{
@@ -156,16 +156,28 @@ export function MobileComposer({
    if (text && !text.startsWith("/")) void refreshTitleAfterFirstSend(target, text).catch(() => undefined);
    onSent();
   } catch (e) {
-   const st = useApp.getState();
+   let st = useApp.getState();
    if (optimisticId) {
     st.set({ eventsBySession: { ...st.eventsBySession, [target]: (st.eventsBySession[target] ?? []).filter((m) => m.id !== optimisticId) } });
    }
+   let failure: unknown = e;
+   const movedId = movedSessionId(e);
+   if (movedId && movedId !== target) {
+    const from = target;
+    try {
+     await prepareSessionForSend(from, (id) => movePending(from, id), movedId);
+     failure = new Error(t.sessionMovedRetry);
+    } catch (moveError) {
+     failure = moveError;
+    }
+   }
+   st = useApp.getState();
    const occupied = new Set(st.attachmentsOf(target).map((image) => image.slot));
    const restored = st.addAttachments(target, attachments.map((image) => occupied.has(image.slot) ? { ...image, slot: undefined } : image));
    const original = attachments.length ? restoreImageOrder(withImageOrderNote(text, attachments), restored) : text;
    const current = st.draftOf(target);
    st.setDraft(target, original.trim() && current.trim() ? `${original}\n\n${current}` : original + current);
-   setError(e instanceof Error ? e.message : String(e));
+   setError(failure instanceof Error ? failure.message : String(failure));
   } finally {
    busyRef.current = false;
    setBusy(false);
