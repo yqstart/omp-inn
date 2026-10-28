@@ -1297,6 +1297,10 @@ type ViewMsgBase =
   awaitingEcho?: boolean;
   /** 发送前已加载历史的向前分页边界；该边界之前的记录不可能是本次发送。 */
   historyBeforeSend?: number;
+  /** 发送前已读取的文件末尾；仅用于排除确定早于发送的历史记录。 */
+  historyEndBeforeSend?: number;
+  /** 历史用户消息在会话文件中的起始字节位置。 */
+  historyOffset?: number;
   /** 随消息发出的图片（实时帧或 jsonl 的 image 内容块）；渲染为气泡内缩略图。 */
   images?: ImageBlock[];
   /** 因体积过大被刻意省略的图片数（历史回放不做无上限 base64 常驻）。 */

@@ -405,7 +405,9 @@ export async function openSessionWithHistory(
   const gap = previous && page.end !== undefined && previous.end > 0 &&
    (page.end < previous.end || (page.before != null && page.before > previous.end));
   if (gap) {
-   const remaining = (cur.eventsBySession[realId] ?? []).filter((m) => previous.records[m.id] !== m);
+   const remaining = (cur.eventsBySession[realId] ?? [])
+    .filter((m) => previous.records[m.id] !== m)
+    .map((m) => m.kind === "user" ? { ...m, historyBeforeSend: undefined, historyEndBeforeSend: undefined } : m);
    const historyPages = { ...cur.historyPages };
    delete historyPages[realId];
    cur.set({ eventsBySession: { ...cur.eventsBySession, [realId]: remaining }, historyPages });
@@ -452,7 +454,14 @@ export async function openSessionWithHistory(
     return m.kind === "tool" && exact.kind === "tool" ? mergeToolCard(m, exact) : exact;
    }
    const key = historyPairKey(m);
-   const localId = key ? localByKey.get(key)?.shift() : undefined;
+   const candidates = key ? localByKey.get(key) : undefined;
+   // 旧页末尾已在发送前读到时，起始位置更早的历史不可能是本次发送。
+   const candidateIndex = candidates?.findIndex((id) => {
+    const local = byId.get(id);
+    return m.kind !== "user" || local?.kind !== "user" || m.historyOffset == null ||
+     local.historyEndBeforeSend == null || m.historyOffset >= local.historyEndBeforeSend;
+   }) ?? -1;
+   const localId = candidateIndex < 0 ? undefined : candidates?.splice(candidateIndex, 1)[0];
    if (localId) {
     matched.set(localId, index);
     const original = byId.get(localId);

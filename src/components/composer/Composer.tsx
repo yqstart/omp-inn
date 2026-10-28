@@ -1093,6 +1093,7 @@ export function Composer() {
     sentText: text,
     awaitingEcho: true,
     historyBeforeSend: useApp.getState().historyPages[sid]?.before ?? undefined,
+    historyEndBeforeSend: useApp.getState().historyPages[sid]?.end,
     mentions: extractMentions(raw),
     ...(sentImages.length > 0
      ? { images: sentImages.map((a) => ({ mimeType: a.mimeType, data: a.dataBase64 })) }

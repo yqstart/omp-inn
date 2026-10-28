@@ -317,6 +317,7 @@ export function viewMsgsFromJsonlLines(lines: unknown[], t: Text, page?: { befor
      id: `u:${lid}`,
      text,
      mentions: [],
+     ...(offset != null ? { historyOffset: offset } : {}),
      ...(images.length > 0 ? { images } : {}),
      ...(omitted > 0 ? { imagesOmitted: omitted } : {}),
      ...(at != null ? { at } : {}),
