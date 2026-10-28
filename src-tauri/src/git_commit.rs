@@ -634,17 +634,17 @@ pub(crate) async fn run_git_commit(
 }
 
 /// `git push`（有上游直接推；没有上游时 `-u <remote> <branch>` 建立跟踪）。
-/// 失败返回 `(错误文本, hint)`。
+/// 失败返回 `(错误文本, hint, 取消分支已完成)`。
 pub(crate) async fn run_git_push(
     git: &str,
     cwd: &str,
     cancel: &CancelToken,
     on_line: &mut (impl FnMut(&str, OutStream) + Send),
-) -> Result<(), (String, Option<String>)> {
+) -> Result<(), (String, Option<String>, bool)> {
     // 分支：detached HEAD / 无提交时无法推送
     let head_out = run_git(git, cwd, &["status", "--porcelain=v1", "-b", "-z"])
         .await
-        .map_err(|e| (e, None))?;
+        .map_err(|e| (e, None, false))?;
     let (header, _) = git_ops::split_status_header_z(&head_out);
     let (upstream, _, _, upstream_gone) = parse_status_header(header);
     let branch = run_git(git, cwd, &["symbolic-ref", "-q", "--short", "HEAD"])
@@ -652,7 +652,7 @@ pub(crate) async fn run_git_push(
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| ("游离 HEAD 不能推送，请先切换到分支".to_string(), None))?;
+        .ok_or_else(|| ("游离 HEAD 不能推送，请先切换到分支".to_string(), None, false))?;
     // 上游被远程删掉（`[gone]`）时重新建立跟踪，而不是拿一个不存在的上游去推
     let has_upstream = upstream.is_some() && !upstream_gone;
     let remotes: Vec<String> = run_git(git, cwd, &["remote"])
@@ -664,24 +664,24 @@ pub(crate) async fn run_git_push(
         .map(str::to_string)
         .collect();
     let args = git_ops::push_args(&branch, has_upstream, &remotes).map_err(|e| {
-        (e, Some("在终端里执行 git remote add origin <url>".to_string()))
+        (e, Some("在终端里执行 git remote add origin <url>".to_string()), false)
     })?;
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let child = spawn_git(git, cwd, &refs, None).map_err(|e| (format!("启动 git push 失败：{e}"), None))?;
+    let child = spawn_git(git, cwd, &refs, None).map_err(|e| (format!("启动 git push 失败：{e}"), None, false))?;
     let pid = child.id();
     let signals = match pump_child_with_timeout(child, pid, Some(cancel), PUSH_TIMEOUT, |l, s| on_line(l, s)).await {
         Ok(s) => s,
-        Err(failure) => return Err((failure.message("git push 超时（120s）"), None)),
+        Err(failure) => return Err((failure.message("git push 超时（120s）"), None, false)),
     };
     if signals.canceled {
-        return Err(("推送已取消".to_string(), None));
+        return Err(("推送已取消".to_string(), None, true));
     }
     if signals.code == Some(0) {
         return Ok(());
     }
     let error = signals.error_text();
     let hint = failure_hint(&error).map(str::to_string);
-    Err((error, hint))
+    Err((error, hint, false))
 }
 
 // ---------- 完整轨：omp commit ----------
@@ -937,7 +937,7 @@ pub async fn commit_selected(
                         let _ = on_event.send(CommitEvent::Phase { phase: CommitPhase::Pushing });
                         match run_git_push(&git, &cwd_key, &cancel, &mut log).await {
                             Ok(()) => outcome.phase = CommitPhase::Pushed,
-                            Err((error, hint)) => {
+                            Err((error, hint, _)) => {
                                 // 部分成功：提交已成立，只有推送失败
                                 outcome.phase = CommitPhase::Failed;
                                 outcome.error = Some(error);
@@ -1040,8 +1040,8 @@ pub async fn push_workspace(state: State<'_, AppState>, cwd: String, on_event: C
         let mut outcome = CommitOutcome::new(CommitPhase::Pushing);
         match run_git_push(&git, &cwd_key, &cancel, &mut log).await {
             Ok(()) => outcome.phase = CommitPhase::Pushed,
-            Err((error, hint)) => {
-                outcome.phase = if cancel.is_canceled() { CommitPhase::Canceled } else { CommitPhase::Failed };
+            Err((error, hint, canceled)) => {
+                outcome.phase = if canceled { CommitPhase::Canceled } else { CommitPhase::Failed };
                 outcome.error = Some(error);
                 outcome.hint = hint;
             }
