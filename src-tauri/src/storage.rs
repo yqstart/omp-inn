@@ -146,10 +146,9 @@ fn file_usage(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
-/// 删除目录下早于 `cutoff` 的普通文件（不删目录、不跟随符号链接）。
-/// 返回 (字节, 文件数, 错误)。
-fn prune_old(root: &Path, cutoff: SystemTime, keep_recent: Duration) -> (u64, u64, Vec<String>) {
-    fn walk(dir: &Path, depth: u32, cutoff: SystemTime, keep_recent_until: SystemTime, bytes: &mut u64, files: &mut u64, errors: &mut Vec<String>) {
+/// 统计或删除目录下早于 `cutoff` 的普通文件（不删目录、不跟随符号链接）。
+fn scan_old(root: &Path, cutoff: SystemTime, keep_recent: Duration, delete: bool) -> (u64, u64, Vec<String>) {
+    fn walk(dir: &Path, depth: u32, cutoff: SystemTime, keep_recent_until: SystemTime, delete: bool, bytes: &mut u64, files: &mut u64, errors: &mut Vec<String>) {
         if depth > MAX_DEPTH || *files >= MAX_FILES {
             return;
         }
@@ -161,7 +160,7 @@ fn prune_old(root: &Path, cutoff: SystemTime, keep_recent: Duration) -> (u64, u6
                 continue;
             }
             if ft.is_dir() {
-                walk(&entry.path(), depth + 1, cutoff, keep_recent_until, bytes, files, errors);
+                walk(&entry.path(), depth + 1, cutoff, keep_recent_until, delete, bytes, files, errors);
                 continue;
             }
             if !ft.is_file() {
@@ -171,7 +170,8 @@ fn prune_old(root: &Path, cutoff: SystemTime, keep_recent: Duration) -> (u64, u6
             if modified >= cutoff || modified >= keep_recent_until {
                 continue;
             }
-            match std::fs::remove_file(entry.path()) {
+            let result = if delete { std::fs::remove_file(entry.path()) } else { Ok(()) };
+            match result {
                 Ok(()) => {
                     *bytes = bytes.saturating_add(meta.len());
                     *files += 1;
@@ -184,8 +184,13 @@ fn prune_old(root: &Path, cutoff: SystemTime, keep_recent: Duration) -> (u64, u6
     let mut files = 0;
     let mut errors = vec![];
     let keep_recent_until = now().checked_sub(keep_recent).unwrap_or(SystemTime::UNIX_EPOCH);
-    walk(root, 0, cutoff, keep_recent_until, &mut bytes, &mut files, &mut errors);
+    walk(root, 0, cutoff, keep_recent_until, delete, &mut bytes, &mut files, &mut errors);
     (bytes, files, errors)
+}
+
+/// 确认清理后删除符合条件的文件。
+fn prune_old(root: &Path, cutoff: SystemTime, keep_recent: Duration) -> (u64, u64, Vec<String>) {
+    scan_old(root, cutoff, keep_recent, true)
 }
 
 /// 跑一次 `omp gc`（`--json`；`apply = false` 时是 dry-run），返回解析后的 JSON。
@@ -310,9 +315,9 @@ pub async fn preview_storage_cleanup(app: AppHandle, state: State<'_, AppState>,
     let agent = state.agent_dir.lock().await.clone();
     let d = dirs(&app, agent)?;
     let cutoff = older_than(older_days.unwrap_or(7));
-    let (logs_bytes, _, _) = prune_old(&d.logs, cutoff, Duration::from_secs(LOG_KEEP_RECENT_SECS));
-    let (paste_bytes, _, _) = prune_old(&d.paste, cutoff, Duration::ZERO);
-    let (backup_bytes, _, _) = prune_old(&d.backups, cutoff, Duration::ZERO);
+    let (logs_bytes, _, _) = scan_old(&d.logs, cutoff, Duration::from_secs(LOG_KEEP_RECENT_SECS), false);
+    let (paste_bytes, _, _) = scan_old(&d.paste, cutoff, Duration::ZERO, false);
+    let (backup_bytes, _, _) = scan_old(&d.backups, cutoff, Duration::ZERO, false);
     let mut preview = StoragePreview { logs_bytes, paste_bytes, backup_bytes, ..Default::default() };
     let bin = discover_omp_path(&state).ok_or_else(|| cmd_err("NO_OMP", "没有找到 omp 可执行文件".into(), None))?;
     match run_gc(&bin, &["--blobs", "--archive", "--wal"], false).await {
