@@ -10,6 +10,7 @@ import { useApp } from "../stores/app";
 
 const MAX_IMAGES = 4;
 const MAX_EDGE = 2048;
+let localMessageSequence = 0;
 
 async function fileToImage(file: File): Promise<ImageAttachment> {
  // iOS 相机的 HEIC 在部分版本里 type 是 `image/heic` 甚至空串；不按 MIME 白名单卡死，
@@ -109,6 +110,7 @@ export function MobileComposer({
   initial.setDraft(sid, "");
   initial.clearAttachments(sid);
   let target = sid;
+  let optimisticId: string | undefined;
   const movePending = (id: string) => {
    target = id;
    const st = useApp.getState();
@@ -134,6 +136,19 @@ export function MobileComposer({
     await api.steerMessage(sid, wireText, attachments.length ? attachments : undefined);
    } else {
     target = await prepareSessionForSend(sid, movePending);
+    const st = useApp.getState();
+    optimisticId = `u-local-mobile-${++localMessageSequence}`;
+    st.appendEvents(target, [{
+     kind: "user",
+     id: optimisticId,
+     text,
+     sentText: text,
+     awaitingEcho: true,
+     historyBeforeSend: st.historyPages[target]?.before ?? undefined,
+     historyEndBeforeSend: st.historyPages[target]?.end,
+     mentions: [],
+     ...(attachments.length ? { images: attachments.map((a) => ({ mimeType: a.mimeType, data: a.dataBase64 })) } : {}),
+    }]);
     await api.sendMessage(target, wireText, attachments.length ? attachments : undefined);
     // 新回合开始：上一轮已全部完成的任务清单收起（与桌面 Composer 同一口径）
     useApp.getState().dismissCompletedPlans(target);
@@ -142,6 +157,9 @@ export function MobileComposer({
    onSent();
   } catch (e) {
    const st = useApp.getState();
+   if (optimisticId) {
+    st.set({ eventsBySession: { ...st.eventsBySession, [target]: (st.eventsBySession[target] ?? []).filter((m) => m.id !== optimisticId) } });
+   }
    const occupied = new Set(st.attachmentsOf(target).map((image) => image.slot));
    const restored = st.addAttachments(target, attachments.map((image) => occupied.has(image.slot) ? { ...image, slot: undefined } : image));
    const original = attachments.length ? restoreImageOrder(withImageOrderNote(text, attachments), restored) : text;
