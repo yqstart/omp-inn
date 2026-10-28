@@ -54,6 +54,7 @@ Store 里的草稿是**编辑器的投影**：
   - 图片（png / jpg / jpeg / webp / gif）走附件：`api.readImageFile` → `commitImages`，`#N` 占位与粘贴 / 拖拽同一收尾。
   - 其他文件在光标处插引用芯片：`insertReference`，路径 = `lib/workspaceFiles.ts` 的 `referenceTarget(cwd, abs)`——会话目录内相对、目录外绝对，与右栏文件树 / ⌘⇧P 同一条投递口径。**不许**给 omp 塞它不支持的通用文件附件。
 - **图片 `#N` 映射**：`#N` 只是壳写进正文的普通文本，omp 不解析。发送时若正文引用了**已附带附件**的 `#N`，壳侧在 wire text 末尾补一行 `[omp image order: #1=image 1, #3=image 2]`（`lib/imageRefs.ts`，按图片数组顺序，不是正文出现顺序；没有引用就不补）。
+- 排队消息编辑或中断退回草稿时，按顺序注记将正文引用改成新分配的附件编号；多条消息分别处理，保留已有草稿附件的编号。
   - 这行只给模型看：乐观回显 / 历史回放 / 队列行 / 队列编辑与中断还原 / 派生标题都按同格式剥掉（`stripImageOrderNote` + 后端 `user_message_text`）。omp 会原样落进 jsonl，所以导出文件里仍能看到。
   - 删图后的编号空洞、悬空 `#N` 如实按剩余图片位置映射。
 - **工作区文件** = ⌘⇧P 的跨项目引用浮层（投 `refPickerTarget`），不是第二个文件选择器。**入口只在当前项目处于多成员工作区时出现**（`lib/workspaceFiles.ts` 的 `hasWorkspaceRefs` = `referenceScope().others.length > 0`）：未分组 / 单成员工作区 / 目录不属于任何项目时整行不渲染（不是禁用——没有可引用的范围）。

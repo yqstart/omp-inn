@@ -20,6 +20,31 @@ const NOTE_RE = /\n\n\[omp image order: #\d+=image \d+(?:, #\d+=image \d+)*\]$/;
 /** `#N` 里 N 所属的附件（`slot`）→ 它在 `images` 数组里的 1-based 位置。 */
 type Ref = { slot: number; index: number };
 
+/** 按发送侧的边界规则处理正文里的独立图片编号。 */
+function rewriteImageRefs(text: string, rewrite: (slot: number) => number | null): string {
+ let out = "";
+ let copied = 0;
+ for (let i = 0; i < text.length; i += 1) {
+  if (text[i] !== "#") continue;
+  const prev = i > 0 ? text[i - 1] : "";
+  if (prev && /[A-Za-z0-9_#]/.test(prev)) continue;
+  let j = i + 1;
+  while (j < text.length && text[j] >= "0" && text[j] <= "9") j += 1;
+  if (j === i + 1) continue;
+  const next = j < text.length ? text[j] : "";
+  if (next && /[A-Za-z_]/.test(next)) continue;
+  const digits = text.slice(i + 1, j);
+  if (digits.length > 1 && digits[0] === "0") continue;
+  const replacement = rewrite(Number(digits));
+  if (replacement !== null) {
+   out += `${text.slice(copied, i)}#${replacement}`;
+   copied = j;
+  }
+  i = j - 1;
+ }
+ return out + text.slice(copied);
+}
+
 /**
  * 正文里实际引用的附件（按图片数组顺序返回）。
  *
@@ -34,22 +59,10 @@ function referencedImages(text: string, images: ImageAttachment[]): Ref[] {
  });
  if (bySlot.size === 0) return [];
  const hits = new Set<number>();
- for (let i = 0; i < text.length; i += 1) {
-  if (text[i] !== "#") continue;
-  const prev = i > 0 ? text[i - 1] : "";
-  if (prev && /[A-Za-z0-9_#]/.test(prev)) continue;
-  let j = i + 1;
-  while (j < text.length && text[j] >= "0" && text[j] <= "9") j += 1;
-  if (j === i + 1) continue;
-  // `#1a` / `#1_foo` 是标签或标识，不是附件编号；`#01` 也不是壳分配的写法
-  const next = j < text.length ? text[j] : "";
-  if (next && /[A-Za-z_]/.test(next)) continue;
-  const digits = text.slice(i + 1, j);
-  if (digits.length > 1 && digits[0] === "0") continue;
-  const n = Number(digits);
-  if (bySlot.has(n)) hits.add(n);
-  i = j - 1;
- }
+ rewriteImageRefs(text, (slot) => {
+  if (bySlot.has(slot)) hits.add(slot);
+  return null;
+ });
  // 按图片顺序列，不按正文出现顺序：注记描述的是「模型看到的第几张图」
  return images.flatMap((img, i) =>
   typeof img.slot === "number" && hits.has(img.slot) ? [{ slot: img.slot, index: i + 1 }] : [],
@@ -72,4 +85,17 @@ export function withImageOrderNote(text: string, images: ImageAttachment[]): str
 /** 展示 / 队列回退用：剥掉发送时补的附件顺序注记（用户自己写的同款行极少，按整行精确匹配）。 */
 export function stripImageOrderNote(text: string): string {
  return text.replace(NOTE_RE, "");
+}
+
+/** 队列图片重新分配编号后，用注记把正文中的旧编号同步为新编号。 */
+export function restoreImageOrder(text: string, images: ImageAttachment[]): string {
+ const note = text.match(NOTE_RE)?.[0];
+ const slots = new Map<number, number>();
+ if (note) {
+  for (const match of note.matchAll(/#(\d+)=image (\d+)/g)) {
+   const slot = images[Number(match[2]) - 1]?.slot;
+   if (slot !== undefined) slots.set(Number(match[1]), slot);
+  }
+ }
+ return rewriteImageRefs(stripImageOrderNote(text), (slot) => slots.get(slot) ?? null);
 }

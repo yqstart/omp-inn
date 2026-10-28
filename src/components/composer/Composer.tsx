@@ -31,7 +31,7 @@ import { MentionList, type MentionRow, type PathCandidate } from "./MentionList"
 import { DraftEditor, type DraftEditorHandle, type DraftTextSource } from "./draft/DraftEditor";
 import { hasWorkspaceRefs, referenceTarget } from "../../lib/workspaceFiles";
 import { useOutsideDismiss } from "../../lib/useDropdown";
-import { stripImageOrderNote, withImageOrderNote } from "../../lib/imageRefs";
+import { restoreImageOrder, stripImageOrderNote, withImageOrderNote } from "../../lib/imageRefs";
 import { SlashMenu, type SlashAction } from "./SlashMenu";
 import { ApprovalModeMenu } from "./ApprovalModeMenu";
 import { FastMenu } from "./FastMenu";
@@ -790,13 +790,12 @@ export function Composer() {
   try {
    const r = await api.removeQueuedMessage(sid, text, queue);
    if (!r.removed) return;
-   // 队列里存的是发给 omp 的真路径 + 附件顺序注记：退回草稿前剥掉注记、缩回短标签
-   const back = await shortenMentions(stripImageOrderNote(text));
+   // 按新分配的附件编号改写正文，再剥掉队列里的顺序注记。
+   const back = await shortenMentions(text);
+   const images = addAttachments(sid, (r.images ?? []).map(attachmentFromOmpImage));
+   const restored = restoreImageOrder(back, images);
    const cur = useApp.getState().draftOf(sid);
-   persistDraft(sid, cur.trim() ? `${cur}\n\n${back}` : back);
-   if (r.images && r.images.length > 0) {
-    addAttachments(sid, (r.images as { data?: string; mimeType?: string }[]).map(attachmentFromOmpImage));
-   }
+   persistDraft(sid, cur.trim() ? `${cur}\n\n${restored}` : restored);
    editorRef.current?.focus();
   } catch {
    // 失败（已被投递 / 已消费）：队列快照随后自行收敛，不弹错
@@ -835,16 +834,15 @@ export function Composer() {
    const items = [...r.steering, ...r.followUp];
    if (items.length > 0) {
     const text = items
-     .map((i) => stripImageOrderNote(i.text))
+     .map((i) => {
+      const images = addAttachments(sid, (i.images ?? []).map(attachmentFromOmpImage));
+      return restoreImageOrder(i.text, images);
+     })
      .filter((x) => x.trim())
      .join("\n\n");
     if (text) {
      const cur = useApp.getState().draftOf(sid);
      persistDraft(sid, cur.trim() ? `${cur}\n\n${text}` : text);
-    }
-    const imgs = items.flatMap((i) => i.images ?? []);
-    if (imgs.length > 0) {
-     addAttachments(sid, imgs.map((x) => attachmentFromOmpImage(x as { data?: string; mimeType?: string })));
     }
     editorRef.current?.focus();
    }
