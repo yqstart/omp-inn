@@ -224,19 +224,16 @@ impl RemoteManager {
         Ok(changed)
     }
 
-    pub fn revoke_all(&self) -> Result<usize, String> {
+    /// 在同一把锁内取出实际撤销的设备身份；保存失败也要返回清单以断开连接。
+    pub fn revoke_all(&self) -> (Vec<String>, Result<(), String>) {
         let mut store = self.inner.store.lock().unwrap();
-        let n = store.revoke_all();
-        store.persist_devices()?;
-        Ok(n)
+        let ids = store.devices().into_iter().map(|d| d.id).collect();
+        store.revoke_all();
+        (ids, store.persist_devices())
     }
 
     fn prefs(&self) -> RemotePrefs {
         self.inner.store.lock().unwrap().prefs.clone()
-    }
-
-    fn devices(&self) -> Vec<DeviceView> {
-        self.inner.store.lock().unwrap().devices()
     }
 
     pub async fn status(&self) -> RemoteStatus {
@@ -613,8 +610,7 @@ pub async fn remote_revoke_device(
 
 #[tauri::command]
 pub async fn remote_revoke_all(app: AppHandle, manager: State<'_, RemoteManager>) -> Result<RemoteStatus, crate::commands::CmdError> {
-    let ids = manager.devices().into_iter().map(|d| d.id).collect::<Vec<_>>();
-    let result = manager.revoke_all();
+    let (ids, result) = manager.revoke_all();
     for id in ids {
         manager.hub().revoke_device(&id);
     }
