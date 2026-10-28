@@ -1293,6 +1293,8 @@ type ViewMsgBase =
   mentions: string[];
   /** 本地原文对应的发送文本，用于与运行时回显及历史配对。 */
   sentText?: string;
+  /** 历史先于实时回显到达时，继续等待同一条消息的回显。 */
+  awaitingEcho?: boolean;
   /** 随消息发出的图片（实时帧或 jsonl 的 image 内容块）；渲染为气泡内缩略图。 */
   images?: ImageBlock[];
   /** 因体积过大被刻意省略的图片数（历史回放不做无上限 base64 常驻）。 */

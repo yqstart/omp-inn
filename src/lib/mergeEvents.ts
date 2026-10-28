@@ -111,10 +111,11 @@ export function mergeViewMsgs(cur: ViewMsg[], incoming: IncomingViewMsg[]): View
   //（`u-local-*`）是同一条消息的两个版本：用发送文本配对，保留用户输入的原文。
   // 不翻倍——否则「发一次」会在消息列渲染成两条相同的气泡。
   if (next.kind === "user" && next.id.startsWith("u-echo-")) {
-   const idx = out.findIndex((x) => x.kind === "user" && x.id.startsWith("u-local-") && (x.sentText ?? x.text) === next.text);
+   const idx = out.findIndex((x) => x.kind === "user" && (x.id.startsWith("u-local-") || x.awaitingEcho) && (x.sentText ?? x.text) === next.text);
    if (idx >= 0) {
     const local = out[idx] as Extract<ViewMsg, { kind: "user" }>;
-    out[idx] = { ...next, text: local.text, mentions: local.mentions, sentText: next.text };
+    // 历史先到时保留已配对的持久行 id，避免下一次回读再次生成重复行。
+    out[idx] = { ...next, id: local.id.startsWith("u-local-") ? next.id : local.id, text: local.text, mentions: local.mentions, sentText: next.text, awaitingEcho: false };
     continue;
    }
   }

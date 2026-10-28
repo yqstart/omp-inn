@@ -1090,6 +1090,7 @@ export function Composer() {
     id: optimisticId,
     text: raw,
     sentText: text,
+    awaitingEcho: true,
     mentions: extractMentions(raw),
     ...(sentImages.length > 0
      ? { images: sentImages.map((a) => ({ mimeType: a.mimeType, data: a.dataBase64 })) }

@@ -119,7 +119,7 @@ export async function loadEarlierHistory(sid: string, beforeInsert: () => void):
      moved.add(local);
      const original = byId.get(local);
      if (m.kind === "user" && original?.kind === "user") {
-      return [{ ...m, text: original.text, mentions: original.mentions, sentText: m.text }];
+      return [{ ...m, text: original.text, mentions: original.mentions, sentText: m.text, awaitingEcho: original.awaitingEcho }];
      }
     }
     return [m];
@@ -455,7 +455,7 @@ export async function openSessionWithHistory(
     matched.set(localId, index);
     const original = byId.get(localId);
     if (m.kind === "user" && original?.kind === "user") {
-     return { ...m, text: original.text, mentions: original.mentions, sentText: m.text };
+     return { ...m, text: original.text, mentions: original.mentions, sentText: m.text, awaitingEcho: original.awaitingEcho };
     }
    }
    return m;
