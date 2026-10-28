@@ -68,7 +68,21 @@ impl SpawnOpts {
 pub struct SessionActivity {
     last_active_ms: AtomicI64,
     state: AtomicU8,
+    pending_input: std::sync::Mutex<PendingInput>,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputPhase { Prompt, PromptAwaitingResult, QueueAwaitingReply, QueueAwaitingSettled }
+
+#[derive(Default)]
+struct PendingInput {
+    requests: HashMap<String, InputPhase>,
+    awaiting_settled: bool,
+    settle_generation: u64,
+}
+
+const REAP_PROBE_PREFIX: &str = "reap-probe-";
+const REAP_SETTLED_PROBE: &str = "reap-probe-settled-";
 
 /// 与 `dispatch` 发给前端的 `{"state": ...}` 字符串一一对应。
 pub const ACT_IDLE: u8 = 0;
@@ -88,7 +102,7 @@ fn now_ms() -> i64 {
 
 impl SessionActivity {
     fn new() -> Self {
-        Self { last_active_ms: AtomicI64::new(now_ms()), state: AtomicU8::new(ACT_IDLE) }
+        Self { last_active_ms: AtomicI64::new(now_ms()), state: AtomicU8::new(ACT_IDLE), pending_input: std::sync::Mutex::new(PendingInput::default()) }
     }
 
     fn touch(&self) {
@@ -107,6 +121,76 @@ impl SessionActivity {
 
     fn last_active_ms(&self) -> i64 {
         self.last_active_ms.load(Ordering::Relaxed)
+    }
+
+    /// 由进程表锁保护调用，与回收判定和实际投递构成一个原子操作。
+    pub(crate) fn register_input(&self, id: &str, kind: &str) {
+        let phase = if kind == "prompt" { InputPhase::Prompt } else { InputPhase::QueueAwaitingReply };
+        self.pending_input.lock().unwrap_or_else(|e| e.into_inner()).requests.insert(id.to_string(), phase);
+        self.touch();
+    }
+
+    pub(crate) fn cancel_input(&self, id: &str) {
+        self.pending_input.lock().unwrap_or_else(|e| e.into_inner()).requests.remove(id);
+    }
+
+    fn input_pending(&self) -> bool {
+        let pending = self.pending_input.lock().unwrap_or_else(|e| e.into_inner());
+        pending.awaiting_settled || !pending.requests.is_empty()
+    }
+
+    /// 只用本次请求的回包或静止确认解除保护，不受上一轮迟到的终态帧影响。
+    fn observe_input_frame(&self, v: &serde_json::Value) -> Vec<String> {
+        let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
+        let mut pending = self.pending_input.lock().unwrap_or_else(|e| e.into_inner());
+        if typ == "session_settled" {
+            // 即使收到上一轮迟到的静止帧，也必须在该请求已获确认后再次回读真值。
+            let mut probes: Vec<String> = pending.requests.iter().filter_map(|(id, phase)| {
+                matches!(phase, InputPhase::PromptAwaitingResult | InputPhase::QueueAwaitingSettled)
+                    .then(|| format!("{REAP_PROBE_PREFIX}{id}"))
+            }).collect();
+            if pending.awaiting_settled {
+                probes.push(format!("{REAP_SETTLED_PROBE}{}", pending.settle_generation));
+            }
+            return probes;
+        } else if typ == "prompt_result" {
+            pending.requests.remove(id);
+            if v.get("sessionSettled").and_then(|x| x.as_bool()) == Some(false) {
+                // 前一次回读可能先于此结果，仍需对后台投递重新保护并核验。
+                pending.awaiting_settled = true;
+                pending.settle_generation = pending.settle_generation.wrapping_add(1);
+                return vec![format!("{REAP_SETTLED_PROBE}{}", pending.settle_generation)];
+            }
+        } else if typ == "response" {
+            let settled = v.get("success").and_then(|x| x.as_bool()) == Some(true)
+                && v.get("data").and_then(|d| d.get("isSettled")).and_then(|x| x.as_bool()) == Some(true);
+            if let Some(generation) = id.strip_prefix(REAP_SETTLED_PROBE) {
+                if settled && generation.parse::<u64>().ok() == Some(pending.settle_generation) {
+                    pending.awaiting_settled = false;
+                }
+            } else if let Some(original) = id.strip_prefix(REAP_PROBE_PREFIX) {
+                let phase = pending.requests.get(original);
+                if settled
+                    && matches!(phase, Some(InputPhase::PromptAwaitingResult | InputPhase::QueueAwaitingSettled))
+                {
+                    pending.requests.remove(original);
+                }
+            } else if let Some(phase) = pending.requests.get(id).copied() {
+                let failed = v.get("success").and_then(|x| x.as_bool()) == Some(false);
+                let local = v.get("data").and_then(|d| d.get("agentInvoked")).and_then(|x| x.as_bool()) == Some(false);
+                if failed || (phase == InputPhase::Prompt && local) {
+                    pending.requests.remove(id);
+                } else if phase == InputPhase::Prompt {
+                    pending.requests.insert(id.to_string(), InputPhase::PromptAwaitingResult);
+                    return vec![format!("{REAP_PROBE_PREFIX}{id}")];
+                } else if phase == InputPhase::QueueAwaitingReply {
+                    pending.requests.insert(id.to_string(), InputPhase::QueueAwaitingSettled);
+                    return vec![format!("{REAP_PROBE_PREFIX}{id}")];
+                }
+            }
+        }
+        vec![]
     }
 }
 
@@ -150,7 +234,7 @@ const REAP_INTERVAL_SECS: u64 = 60;
 /// 只认 [`ACT_IDLE`]：`idle-awaiting`（等后台完成投递，唤醒的 follow-up 可能在路上）
 /// 与 running / awaiting / exited 一样排除在外。
 fn idle_recyclable(act: &SessionActivity, now_ms: i64, idle_ms: i64) -> bool {
-    act.state() == ACT_IDLE && now_ms.saturating_sub(act.last_active_ms()) >= idle_ms
+    act.state() == ACT_IDLE && !act.input_pending() && now_ms.saturating_sub(act.last_active_ms()) >= idle_ms
 }
 
 /// 闲置回收循环（app 启动时挂一次）：每 [`REAP_INTERVAL_SECS`] 秒扫一遍聊天会话进程表，
@@ -166,21 +250,7 @@ pub fn start_idle_reaper<R: tauri::Runtime>(app: AppHandle<R>) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(REAP_INTERVAL_SECS)).await;
             let state = app.state::<crate::commands::AppState>();
-            let now = now_ms();
-            let victims: Vec<String> = {
-                let rt = state.runtime.lock().await;
-                rt.iter()
-                    .filter(|(_, r)| {
-                        idle_recyclable(&r.activity, now, IDLE_RECYCLE_MS)
-                            && r.session_file.as_ref().map(|f| f.exists()).unwrap_or(false)
-                    })
-                    .map(|(k, _)| k.clone())
-                    .collect()
-            };
-            for sid in victims {
-                eprintln!("[omp-inn] 回收闲置聊天会话进程：{sid}");
-                crate::commands::kill_runtime(&state, &sid);
-            }
+            reclaim_idle_now(&state, IDLE_RECYCLE_MS).await;
         }
     });
 }
@@ -190,19 +260,24 @@ pub fn start_idle_reaper<R: tauri::Runtime>(app: AppHandle<R>) {
 /// 与定时回收同一判定：`idle` 超阈值 + 已落盘——运行中 / 等审批 / 等后台投递的会话一律不碰。
 pub async fn reclaim_idle_now(state: &tauri::State<'_, crate::commands::AppState>, idle_ms: i64) -> usize {
     let now = now_ms();
-    let victims: Vec<String> = {
-        let rt = state.runtime.lock().await;
-        rt.iter()
-            .filter(|(_, r)| {
-                idle_recyclable(&r.activity, now, idle_ms)
-                    && r.session_file.as_ref().map(|f| f.exists()).unwrap_or(false)
-            })
-            .map(|(k, _)| k.clone())
-            .collect()
-    };
-    let count = victims.len();
+    let mut rt = state.runtime.lock().await;
+    let victims: Vec<String> = rt.iter().filter(|(_, r)| {
+        idle_recyclable(&r.activity, now, idle_ms)
+            && r.session_file.as_ref().map(|f| f.exists()).unwrap_or(false)
+    }).map(|(sid, _)| sid.clone()).collect();
+    let mut count = 0;
     for sid in victims {
-        crate::commands::kill_runtime(state, &sid);
+        // 判定、终止及移除都在同一把锁内，发送只能在回收前登记或在回收后恢复。
+        if let Some(r) = rt.get_mut(&sid) {
+            if !idle_recyclable(&r.activity, now_ms(), idle_ms)
+                || !r.session_file.as_ref().map(|f| f.exists()).unwrap_or(false) {
+                continue;
+            }
+            if stop_failed_child(r).await.is_ok() {
+                rt.remove(&sid);
+                count += 1;
+            }
+        }
     }
     count
 }
@@ -1281,6 +1356,19 @@ async fn handle_frame<R: tauri::Runtime>(
     sync_clock: &mut SyncClock,
     session_file: Option<&std::path::Path>,
 ) {
+    let frame_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    if frame_type != "session_settled" {
+        for probe_id in activity.observe_input_frame(v) {
+            // 插话 / 排队可能被扩展同步消费而没有后续静止帧；回读静止真值可安全解除保护。
+            if let Some(line) = jsonl_line(&probe_id, "get_state", serde_json::Value::Null) {
+                let _ = stdin.write_all(line.as_bytes()).await;
+                let _ = stdin.flush().await;
+            }
+        }
+    }
+    if frame_type == "response" && v.get("id").and_then(|v| v.as_str()).is_some_and(|id| id.starts_with(REAP_PROBE_PREFIX)) {
+        return;
+    }
     // 壳侧补标题自己的回包（[`maybe_auto_title`] 注入的 `/rename`）：本地消化
     // （成功无展示价值；失败也不该渲染成一条「操作失败」分隔线——那是后台动作）。
     if v.get("type").and_then(|t| t.as_str()) == Some("response")
@@ -1444,6 +1532,15 @@ async fn handle_frame<R: tauri::Runtime>(
         return;
     }
     dispatch(app, key, evt, status, v, activity);
+    if frame_type == "session_settled" {
+        // 先更新活动态再解除保护，避免两者之间被回收线程观察到错误快照。
+        for probe_id in activity.observe_input_frame(v) {
+            if let Some(line) = jsonl_line(&probe_id, "get_state", serde_json::Value::Null) {
+                let _ = stdin.write_all(line.as_bytes()).await;
+                let _ = stdin.flush().await;
+            }
+        }
+    }
 }
 
 /// 状态串（[`emit_status`] 的调用口径）→ (活动态, 前端口径 state)。
