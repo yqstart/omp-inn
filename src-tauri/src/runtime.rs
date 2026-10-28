@@ -178,10 +178,10 @@ impl SessionActivity {
                 }
             } else if let Some(phase) = pending.requests.get(id).copied() {
                 let failed = v.get("success").and_then(|x| x.as_bool()) == Some(false);
-                let local = v.get("data").and_then(|d| d.get("agentInvoked")).and_then(|x| x.as_bool()) == Some(false);
-                if failed || (phase == InputPhase::Prompt && local) {
+                if failed {
                     pending.requests.remove(id);
                 } else if phase == InputPhase::Prompt {
+                    // 本地命令也可能启动后台工作；必须回读静止状态才能解除保护。
                     pending.requests.insert(id.to_string(), InputPhase::PromptAwaitingResult);
                     return vec![format!("{REAP_PROBE_PREFIX}{id}")];
                 } else if phase == InputPhase::QueueAwaitingReply {
