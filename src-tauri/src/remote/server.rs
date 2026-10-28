@@ -183,12 +183,16 @@ async fn pair(
         Err(PairError::Expired) => api_error(StatusCode::GONE, "PAIRING_EXPIRED", "二维码已过期，请在电脑上重新生成"),
         Err(PairError::Used) => api_error(StatusCode::GONE, "PAIRING_USED", "二维码已被使用，请在电脑上重新生成"),
         Err(PairError::BadSecret) => api_error(StatusCode::FORBIDDEN, "PAIRING_BAD", "配对密钥不正确"),
+        Err(PairError::Storage) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "PAIRING_STORAGE", "保存设备失败，请检查电脑上的存储后重新配对"),
     }
 }
 
 async fn logout(State(ctx): State<Ctx>, Extension(a): Extension<AuthDevice>) -> Response {
-    ctx.manager.revoke_device(&a.device.id);
-    let mut res = Json(json!({"ok": true})).into_response();
+    let result = ctx.manager.revoke_device(&a.device.id);
+    let mut res = match result {
+        Ok(_) => Json(json!({"ok": true})).into_response(),
+        Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "REMOTE_STORAGE", "本次运行已退出，但保存失败，重启后设备可能恢复；请在电脑上重试撤销"),
+    };
     if let Ok(v) = auth::clear_cookie(a.secure).parse() {
         res.headers_mut().insert(header::SET_COOKIE, v);
     }

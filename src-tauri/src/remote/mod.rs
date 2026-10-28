@@ -77,6 +77,7 @@ pub struct RemoteStatus {
     pub pairing_active: bool,
     pub pairing_expires_in: u64,
     pub devices: Vec<DeviceView>,
+    pub devices_save_pending: bool,
     pub connections: usize,
     pub tailscale: TailscaleView,
     pub error: Option<String>,
@@ -95,6 +96,7 @@ pub enum PairError {
     Expired,
     Used,
     BadSecret,
+    Storage,
 }
 
 struct RunningServer {
@@ -206,36 +208,27 @@ impl RemoteManager {
         }
         p.consume();
         drop(guard);
-        let (token, device) = {
+        let issued = {
             let mut store = self.inner.store.lock().unwrap();
-            let out = store.issue_token(existing, name, ip, ua);
-            let _ = store.save_devices();
-            out
+            store.issue_token_persisted(existing, name, ip, ua)
         };
         *self.inner.pairing.lock().unwrap() = None;
-        Ok((token, device))
+        issued.map_err(|_| PairError::Storage)
     }
 
-    pub fn revoke_device(&self, id: &str) -> bool {
-        let changed = {
-            let mut store = self.inner.store.lock().unwrap();
-            let changed = store.revoke(id);
-            if changed {
-                let _ = store.save_devices();
-            }
-            changed
-        };
-        changed
+    pub fn revoke_device(&self, id: &str) -> Result<bool, String> {
+        let mut store = self.inner.store.lock().unwrap();
+        let changed = store.revoke(id);
+        // 即使内存中已不存在也要重试写入：上一次撤销可能未能持久化。
+        store.persist_devices()?;
+        Ok(changed)
     }
 
-    pub fn revoke_all(&self) -> usize {
-        let n = {
-            let mut store = self.inner.store.lock().unwrap();
-            let n = store.revoke_all();
-            let _ = store.save_devices();
-            n
-        };
-        n
+    pub fn revoke_all(&self) -> Result<usize, String> {
+        let mut store = self.inner.store.lock().unwrap();
+        let n = store.revoke_all();
+        store.persist_devices()?;
+        Ok(n)
     }
 
     fn prefs(&self) -> RemotePrefs {
@@ -288,6 +281,10 @@ impl RemoteManager {
                 _ => (false, 0),
             }
         };
+        let (devices, devices_save_pending) = {
+            let store = self.inner.store.lock().unwrap();
+            (store.devices(), store.devices_save_pending())
+        };
         RemoteStatus {
             running,
             access,
@@ -295,7 +292,8 @@ impl RemoteManager {
             addresses,
             pairing_active,
             pairing_expires_in,
-            devices: self.devices(),
+            devices,
+            devices_save_pending,
             connections: self.inner.hub.client_count(),
             tailscale,
             error: self.inner.last_error.lock().unwrap().clone(),
@@ -603,20 +601,25 @@ pub async fn remote_revoke_device(
     manager: State<'_, RemoteManager>,
     id: String,
 ) -> Result<RemoteStatus, crate::commands::CmdError> {
-    manager.revoke_device(&id);
-    manager.hub().revoke_device(&id);
+    let result = manager.revoke_device(&id);
+    // 空 id 只用于重试保存，不对应任何设备，也无需发断开通知。
+    if !id.is_empty() {
+        manager.hub().revoke_device(&id);
+    }
     manager.emit_state(&app);
+    result.map_err(|e| crate::commands::cmd_err("REMOTE_STORAGE", format!("设备已在当前运行中撤销，但保存失败；重启后可能恢复：{e}"), None))?;
     Ok(manager.status().await)
 }
 
 #[tauri::command]
 pub async fn remote_revoke_all(app: AppHandle, manager: State<'_, RemoteManager>) -> Result<RemoteStatus, crate::commands::CmdError> {
     let ids = manager.devices().into_iter().map(|d| d.id).collect::<Vec<_>>();
-    manager.revoke_all();
+    let result = manager.revoke_all();
     for id in ids {
         manager.hub().revoke_device(&id);
     }
     manager.emit_state(&app);
+    result.map_err(|e| crate::commands::cmd_err("REMOTE_STORAGE", format!("设备已在当前运行中撤销，但保存失败；重启后可能恢复：{e}"), None))?;
     Ok(manager.status().await)
 }
 

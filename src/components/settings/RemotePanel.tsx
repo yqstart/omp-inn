@@ -9,6 +9,8 @@ import { useText } from "../../lib/useText";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Switch } from "./Switch";
 
+type RemoteStatusWithSave = RemoteStatus & { devicesSavePending: boolean };
+
 /**
  * 设置 ›「远程控制」：服务开关 / 地址 / 扫码配对 / 设备撤销 / Tailscale。
  *
@@ -20,7 +22,7 @@ import { Switch } from "./Switch";
  */
 export function RemotePanel() {
  const t = useText();
- const [status, setStatus] = useState<RemoteStatus | null>(null);
+ const [status, setStatus] = useState<RemoteStatusWithSave | null>(null);
  const [error, setError] = useState<string | null>(null);
  const [busy, setBusy] = useState(false);
  const [port, setPort] = useState(43110);
@@ -35,7 +37,7 @@ export function RemotePanel() {
  const mounted = useRef(true);
 
  const apply = useCallback((s: RemoteStatus) => {
-  setStatus(s);
+  setStatus(s as RemoteStatusWithSave);
   setAccess(s.access === "tailscale" ? "tailscale" : "lan");
   setPort(s.port);
  }, []);
@@ -157,6 +159,19 @@ export function RemotePanel() {
   }
  };
 
+ const retryDeviceSave = async () => {
+  setBusy(true);
+  setError(null);
+  try {
+   // 空设备标识不撤销其他设备，只重试保存当前内存中的设备列表。
+   apply(await api.remoteRevokeDevice(""));
+  } catch (e) {
+   setError(e instanceof Error ? e.message : String(e));
+  } finally {
+   setBusy(false);
+  }
+ };
+
  // 初始 status 的 tailscale 是默认空值；探测结果在 status 还没带上真实信息时优先。
  const tailscale = status?.tailscale?.installed || status?.tailscale?.error ? status.tailscale : (tsProbe ?? status?.tailscale);
 
@@ -183,6 +198,15 @@ export function RemotePanel() {
    {error && (
     <div role="alert" className="mt-4 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[13px] text-danger">
      {error}
+    </div>
+   )}
+
+   {status?.devicesSavePending && (
+    <div role="alert" className="mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
+     <span className="flex-1">{t.remoteDeviceSavePending}</span>
+     <button type="button" onClick={() => void retryDeviceSave()} disabled={busy} className="cursor-pointer underline disabled:opacity-50">
+      {t.remoteDeviceSaveRetry}
+     </button>
     </div>
    )}
 

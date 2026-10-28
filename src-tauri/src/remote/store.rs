@@ -120,6 +120,7 @@ pub struct Store {
     pub prefs: RemotePrefs,
     salt: String,
     devices: Vec<DeviceRecord>,
+    devices_save_pending: bool,
 }
 
 impl Store {
@@ -139,7 +140,7 @@ impl Store {
             None => (new_secret(16), Vec::new()),
         };
 
-        let store = Self { prefs_path, devices_path, prefs, salt, devices };
+        let store = Self { prefs_path, devices_path, prefs, salt, devices, devices_save_pending: false };
         // 首次启动 / 设备文件损坏后立刻落一份，避免每次启动换 salt（那会让所有设备静默失效）。
         let _ = store.save_prefs();
         let _ = store.save_devices();
@@ -159,6 +160,17 @@ impl Store {
         };
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         write_private(&self.devices_path, &text)
+    }
+
+    /// 保存撤销后的设备列表；失败时保留待重试标记，不恢复已撤销的内存令牌。
+    pub fn persist_devices(&mut self) -> Result<(), String> {
+        let result = self.save_devices();
+        self.devices_save_pending = result.is_err();
+        result
+    }
+
+    pub fn devices_save_pending(&self) -> bool {
+        self.devices_save_pending
     }
 
     pub fn devices(&self) -> Vec<DeviceView> {
@@ -223,6 +235,24 @@ impl Store {
         let view = DeviceView::from(&d);
         self.devices.push(d);
         (token, view)
+    }
+
+    /// 配对记录必须持久化成功才交出令牌；失败时恢复旧令牌与设备记录。
+    pub fn issue_token_persisted(
+        &mut self,
+        existing: Option<&str>,
+        name: &str,
+        ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<(String, DeviceView), String> {
+        let previous = self.devices.clone();
+        let issued = self.issue_token(existing, name, ip, user_agent);
+        if let Err(err) = self.save_devices() {
+            self.devices = previous;
+            return Err(err);
+        }
+        self.devices_save_pending = false;
+        Ok(issued)
     }
 
     pub fn revoke(&mut self, id: &str) -> bool {
