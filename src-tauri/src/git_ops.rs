@@ -375,7 +375,8 @@ async fn ls_files_visible(git: &str, root: &str, paths: &[String]) -> Result<Vec
 /// 勾选集是根基准（来自变更集），git 调用统一在仓库根下跑；已无内容可暂的路径
 /// （已暂存的删除条目 / 被删的未跟踪文件 / 新被忽略的文件）先剔除，不让整批 add 失败。
 pub(crate) async fn apply_selection(git: &str, cwd: &str, paths: &[String]) -> Result<(), CmdError> {
-    let selected: Vec<String> = paths.iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
+    // 路径首尾的空白也是文件名的一部分，不能把勾选变成另一个文件。
+    let selected: Vec<String> = paths.iter().filter(|p| !p.is_empty()).cloned().collect();
     if selected.is_empty() {
         return Err(cmd_err("NO_SELECTION", "请至少勾选一个文件".into(), None));
     }
