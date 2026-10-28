@@ -7,6 +7,83 @@ use std::sync::LazyLock;
 #[cfg(not(windows))]
 use std::time::Duration;
 
+/// 提交任务使用的子进程；Windows 启动前关联作业对象以保留后代进程控制权。
+pub(crate) struct ManagedChild {
+    #[cfg(windows)]
+    child: Box<dyn process_wrap::tokio::ChildWrapper>,
+    #[cfg(windows)]
+    has_job: bool,
+    #[cfg(not(windows))]
+    child: tokio::process::Child,
+}
+
+impl From<tokio::process::Child> for ManagedChild {
+    fn from(child: tokio::process::Child) -> Self {
+        #[cfg(windows)]
+        { Self { child: Box::new(child), has_job: false } }
+        #[cfg(not(windows))]
+        { Self { child } }
+    }
+}
+
+impl ManagedChild {
+    pub(crate) fn spawn(cmd: tokio::process::Command) -> std::io::Result<Self> {
+        #[cfg(windows)]
+        {
+            use process_wrap::tokio::{CommandWrap, JobObject, KillOnDrop};
+            let mut wrapped = CommandWrap::from(cmd);
+            wrapped.wrap(JobObject).wrap(KillOnDrop);
+            Ok(Self { child: wrapped.spawn()?, has_job: true })
+        }
+        #[cfg(not(windows))]
+        {
+            let mut cmd = cmd;
+            Ok(Self { child: cmd.spawn()? })
+        }
+    }
+
+    pub(crate) fn id(&self) -> Option<u32> { self.child.id() }
+
+    pub(crate) fn stdin(&mut self) -> &mut Option<tokio::process::ChildStdin> {
+        #[cfg(windows)] { self.child.stdin() }
+        #[cfg(not(windows))] { &mut self.child.stdin }
+    }
+    pub(crate) fn stdout(&mut self) -> &mut Option<tokio::process::ChildStdout> {
+        #[cfg(windows)] { self.child.stdout() }
+        #[cfg(not(windows))] { &mut self.child.stdout }
+    }
+    pub(crate) fn stderr(&mut self) -> &mut Option<tokio::process::ChildStderr> {
+        #[cfg(windows)] { self.child.stderr() }
+        #[cfg(not(windows))] { &mut self.child.stderr }
+    }
+
+    /// 普通结束只等待主进程；超时或取消时改为等待整个作业。
+    pub(crate) async fn wait_parent(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        #[cfg(windows)]
+        if self.has_job {
+            // 安全：只等待原生子进程，不拆除作业对象；后续仍可终止作业。
+            let child = unsafe { self.child.try_inner_child_mut() }
+                .ok_or_else(|| std::io::Error::other("无法读取子进程"))?;
+            return child.wait().await;
+        }
+        self.child.wait().await
+    }
+
+    pub(crate) async fn wait_tree(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.child.wait().await
+    }
+
+    pub(crate) fn stop_tree(&mut self, pid: Option<u32>) -> bool {
+        #[cfg(windows)]
+        if self.has_job {
+            return self.child.start_kill().is_ok();
+        }
+        let signaled = pid.is_some_and(force_kill_group_checked);
+        let _ = self.child.start_kill();
+        signaled
+    }
+}
+
 /// SIGKILL 进程组（负 pid）；组不存在（不是组长）时退回单进程。
 #[cfg(unix)]
 pub(crate) fn force_kill_group(pid: u32) {

@@ -31,7 +31,7 @@ use crate::commands::{cmd_err, AppState, CmdError};
 use crate::commit_msg;
 use crate::git_info::{dir_exists, git_bin, run_git};
 use crate::git_ops;
-use crate::proc::{force_kill_group, force_kill_group_checked, login_path};
+use crate::proc::{force_kill_group, login_path, ManagedChild};
 
 // ---------- 任务表与取消 ----------
 
@@ -381,22 +381,23 @@ fn push_tail(tail: &mut Vec<String>, text: &str) {
 /// 读两路子进程输出直到收尾：每行去 ANSI 后回调（带流标记）；
 /// 首流 EOF 后给另一流 `STREAM_GRACE` 宽限；取消令牌触发时杀直接子进程并打整个进程组。
 pub(crate) async fn pump_child(
-    mut child: tokio::process::Child,
+    child: impl Into<ManagedChild>,
     pid: Option<u32>,
     cancel: Option<&CancelToken>,
     on_line: impl FnMut(&str, OutStream),
 ) -> RunSignals {
+    let mut child = child.into();
     pump_child_inner(&mut child, pid, cancel, on_line).await
 }
 
 async fn pump_child_inner(
-    child: &mut tokio::process::Child,
+    child: &mut ManagedChild,
     pid: Option<u32>,
     cancel: Option<&CancelToken>,
     mut on_line: impl FnMut(&str, OutStream),
 ) -> RunSignals {
-    let mut stdout = BufReader::new(child.stdout.take().expect("stdout piped")).lines();
-    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped")).lines();
+    let mut stdout = BufReader::new(child.stdout().take().expect("stdout piped")).lines();
+    let mut stderr = BufReader::new(child.stderr().take().expect("stderr piped")).lines();
     let mut canceled = false;
     let mut out_tail: Vec<String> = vec![];
     let mut err_tail: Vec<String> = vec![];
@@ -419,11 +420,8 @@ async fn pump_child_inner(
         tokio::select! {
             _ = cancel_wait, if !canceled => {
                 canceled = true;
-                // 先停止进程树，再回收直接子进程；Windows 依赖父进程定位后代。
-                if let Some(pid) = pid {
-                    force_kill_group(pid);
-                }
-                let _ = child.kill().await;
+                // 先停止进程树；Windows 提交任务通过作业对象覆盖父进程已退出的情况。
+                let _ = child.stop_tree(pid);
             }
             line = stdout.next_line(), if stdout_open => match line {
                 Ok(Some(l)) => {
@@ -457,13 +455,13 @@ async fn pump_child_inner(
             break;
         }
     }
-    let code = child.wait().await.ok().and_then(|s| s.code());
+    let code = if canceled { child.wait_tree().await } else { child.wait_parent().await }.ok().and_then(|s| s.code());
     RunSignals { canceled, code, out_tail, err_tail }
 }
 
 /// 超时后仍持有子进程句柄，先停止进程树，再等待直接子进程回收。
 async fn pump_child_with_timeout(
-    mut child: tokio::process::Child,
+    mut child: ManagedChild,
     pid: Option<u32>,
     cancel: Option<&CancelToken>,
     timeout: Duration,
@@ -472,9 +470,8 @@ async fn pump_child_with_timeout(
     match tokio::time::timeout(timeout, pump_child_inner(&mut child, pid, cancel, on_line)).await {
         Ok(signals) => Ok(signals),
         Err(_) => {
-            let tree_signaled = pid.is_some_and(force_kill_group_checked);
-            let _ = child.start_kill();
-            match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+            let tree_signaled = child.stop_tree(pid);
+            match tokio::time::timeout(Duration::from_secs(5), child.wait_tree()).await {
                 Ok(Ok(_)) if tree_signaled => Err(""),
                 Ok(Ok(_)) => Err("；无法确认进程树已退出"),
                 _ => Err("；无法确认子进程已退出"),
@@ -490,7 +487,7 @@ pub(crate) fn spawn_git(
     cwd: &str,
     args: &[&str],
     stdin_text: Option<&str>,
-) -> std::io::Result<tokio::process::Child> {
+) -> std::io::Result<ManagedChild> {
     let mut cmd = tokio::process::Command::new(git);
     cmd.args(args)
         .current_dir(cwd)
@@ -507,9 +504,9 @@ pub(crate) fn spawn_git(
         use std::os::unix::process::CommandExt;
         cmd.as_std_mut().process_group(0);
     }
-    let mut child = cmd.spawn()?;
+    let mut child = ManagedChild::spawn(cmd)?;
     if let Some(text) = stdin_text {
-        if let Some(mut si) = child.stdin.take() {
+        if let Some(mut si) = child.stdin().take() {
             let data = text.to_string();
             // 与读流并发写（消息可能有几十 KB，串行写满管道会死锁）
             tokio::spawn(async move {
@@ -676,7 +673,7 @@ fn commit_args(context: Option<&str>) -> Vec<String> {
 /// spawn `omp commit [--context=…]`：新进程组（取消时打 `-pid` 覆盖内部的 git 子进程）、
 /// 继承登录 shell 的 PATH（GUI .app 的 PATH 缺 Homebrew）、三路管道、kill_on_drop。
 /// 命令层与真实仓库慢测试共用（见文末 `#[ignore]` 测试）。
-pub(crate) fn spawn_omp_commit(bin: &str, cwd: &str, context: Option<&str>) -> std::io::Result<tokio::process::Child> {
+pub(crate) fn spawn_omp_commit(bin: &str, cwd: &str, context: Option<&str>) -> std::io::Result<ManagedChild> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(commit_args(context));
     cmd.current_dir(cwd)
@@ -692,7 +689,7 @@ pub(crate) fn spawn_omp_commit(bin: &str, cwd: &str, context: Option<&str>) -> s
         use std::os::unix::process::CommandExt;
         cmd.as_std_mut().process_group(0);
     }
-    cmd.spawn()
+    ManagedChild::spawn(cmd)
 }
 
 /// 完整轨的终态判定（纯函数）：退出码分不出「commit 失败」与「没东西可提交」，

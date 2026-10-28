@@ -198,7 +198,7 @@ pub(crate) fn spawn_generate(
     bin: &str,
     args: &[String],
     cwd: &str,
-) -> std::io::Result<tokio::process::Child> {
+) -> std::io::Result<crate::proc::ManagedChild> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
         .current_dir(cwd)
@@ -214,7 +214,7 @@ pub(crate) fn spawn_generate(
         use std::os::unix::process::CommandExt;
         cmd.as_std_mut().process_group(0);
     }
-    cmd.spawn()
+    crate::proc::ManagedChild::spawn(cmd)
 }
 
 #[cfg(test)]
