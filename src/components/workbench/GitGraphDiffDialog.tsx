@@ -56,7 +56,7 @@ export function GitGraphDiffDialog({ target, onClose }: { target: GitGraphDiffTa
     setLoaded({
      key,
      text: r.text,
-     truncated: false,
+     truncated: r.truncated,
      untracked: r.kind === "untracked",
      none: r.kind === "none",
      error: null,

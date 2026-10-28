@@ -2210,31 +2210,27 @@ pub async fn git_file_diff(path: String) -> Result<serde_json::Value, CmdError> 
         .map(|d| d.to_string_lossy().to_string())
         .unwrap_or_default();
     let Some(git) = crate::git_info::git_bin().await else {
-        return Ok(serde_json::json!({"kind": "error", "text": "", "error": "未找到 git"}));
+        return Ok(serde_json::json!({"kind": "error", "text": "", "truncated": false, "error": "未找到 git"}));
     };
     let status = crate::git_info::run_git(&git, &dir, &["status", "--porcelain", "--", path.as_str()]).await;
     match status {
         Ok(out) if out.trim_start().starts_with("??") => {
-            let mut text = std::fs::read_to_string(&p).unwrap_or_default();
-            if text.len() > GIT_DIFF_MAX {
-                text.truncate(GIT_DIFF_MAX);
-            }
-            Ok(serde_json::json!({"kind": "untracked", "text": text}))
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            let (text, truncated) = crate::git_graph::truncate_text(&text, GIT_DIFF_MAX);
+            Ok(serde_json::json!({"kind": "untracked", "text": text, "truncated": truncated}))
         }
         Ok(_) => {
-            let mut diff = crate::git_info::run_git(&git, &dir, &["diff", "HEAD", "--no-color", "--", path.as_str()])
+            let diff = crate::git_info::run_git(&git, &dir, &["diff", "HEAD", "--no-color", "--", path.as_str()])
                 .await
                 .unwrap_or_default();
             if diff.trim().is_empty() {
-                Ok(serde_json::json!({"kind": "none", "text": ""}))
+                Ok(serde_json::json!({"kind": "none", "text": "", "truncated": false}))
             } else {
-                if diff.len() > GIT_DIFF_MAX {
-                    diff.truncate(GIT_DIFF_MAX);
-                }
-                Ok(serde_json::json!({"kind": "diff", "text": diff}))
+                let (diff, truncated) = crate::git_graph::truncate_text(&diff, GIT_DIFF_MAX);
+                Ok(serde_json::json!({"kind": "diff", "text": diff, "truncated": truncated}))
             }
         }
-        Err(e) => Ok(serde_json::json!({"kind": "error", "text": "", "error": e})),
+        Err(e) => Ok(serde_json::json!({"kind": "error", "text": "", "truncated": false, "error": e})),
     }
 }
 

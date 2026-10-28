@@ -248,7 +248,7 @@ export const api = {
  restartSessionRuntime: (id: string) => call<SessionView>(IPC.restartSessionRuntime, { id }),
  /** 单文件工作区 diff（HEAD 对工作区；untracked 给全文）。 */
  gitFileDiff: (path: string) =>
-  call<{ kind: "diff" | "untracked" | "none" | "error"; text: string; error?: string }>(IPC.gitFileDiff, {
+  call<{ kind: "diff" | "untracked" | "none" | "error"; text: string; truncated: boolean; error?: string }>(IPC.gitFileDiff, {
    path,
   }),
  /** 子代理注册表快照（V41；条目形状未知，前端按 `subagentFromFrame` 容错解析）。 */

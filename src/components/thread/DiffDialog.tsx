@@ -5,11 +5,12 @@ import { useApp } from "../../stores/app";
 import { DiffText } from "../git/DiffText";
 import { DialogShell } from "../settings/DialogShell";
 
-type DiffResult =
+type DiffResult = (
  | { kind: "diff"; text: string }
  | { kind: "untracked"; text: string }
  | { kind: "none"; text: string }
- | { kind: "error"; text: string; error?: string };
+ | { kind: "error"; text: string; error?: string }
+) & { truncated?: boolean };
 
 /**
  * 工具卡「查看改动」弹窗（DiffDialog）。
@@ -72,6 +73,7 @@ export function DiffDialog() {
       <pre className="max-h-[60vh] overflow-auto rounded-md bg-code p-3 font-mono text-xs leading-5 whitespace-pre">
        <DiffText text={shown.text} kind={shown.kind} />
       </pre>
+      {result?.truncated && <div className="text-[11px] text-warn">{t.graphDiffTruncated}</div>}
      </div>
     )}
    </div>
