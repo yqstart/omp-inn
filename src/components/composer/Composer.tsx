@@ -888,7 +888,7 @@ export function Composer() {
  /** 已发送 prompt 历史（V41，codex 的 ↑↓ 调回）：浏览态 {sid, idx, backup}——idx 指向历史下标、
   *  backup = 开始浏览前的草稿（↓ 到底还原）。带 sid 标记 → 切会话后自动不活跃，无需 effect 重置。 */
  const [hist, setHist] = useState<{ sid: string; idx: number; backup: string } | null>(null);
- const historyRef = useRef<string[] | null>(null);
+ const historyRef = useRef<{ sid: string; items: string[] } | null>(null);
  const browsing = hist && hist.sid === activeSessionId ? hist : null;
  const resetHistory = () => {
   setHist(null);
@@ -899,8 +899,8 @@ export function Composer() {
  const browseHistory = (dir: 1 | -1) => {
   const sid = activeSessionId;
   if (!sid) return;
-  if (historyRef.current === null) historyRef.current = loadHistory(sid);
-  const list = historyRef.current;
+  if (historyRef.current?.sid !== sid) historyRef.current = { sid, items: loadHistory(sid) };
+  const list = historyRef.current.items;
   if (list.length === 0) return;
   if (!browsing) {
    if (dir === 1) return; // 不在浏览态时 ↓ 不做事
