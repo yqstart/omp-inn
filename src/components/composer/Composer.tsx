@@ -47,6 +47,7 @@ const PASTE_FILE_MIN = 2000;
 /** 空态输入卡的草稿键：`activeSessionId === null` 时也要有草稿，发送时再新建会话。 */
 const NEW_DRAFT = "__new__";
 const NEW_DRAFT_RECOVERY = "omp.newDraftRecovery.v1";
+let localMessageSequence = 0;
 
 /**
  * 会话输入卡（v2 §3 形态，对齐 Codex / ZCode 的输入卡）：
@@ -1081,9 +1082,9 @@ export function Composer() {
   const wireText = withImageOrderNote(text, sentImages);
   // 首条判定：流里还没有 user 消息 = 这是本会话第一条（标题回退只做这一次）
   const isFirst = !(useApp.getState().eventsBySession[sid] ?? []).some((m) => m.kind === "user");
-  // 乐观回显：先落一条本地 user 消息，id 带时间戳；
+  // 乐观回显：先落一条本地 user 消息，用进程序号避免同毫秒发生 id 冲突；
   // 历史回放里同一文本的 `u:<行id>` 到达时按文本合并去重，不翻倍。
-  const optimisticId = `u-local-${Date.now()}`;
+  const optimisticId = `u-local-${++localMessageSequence}`;
   useApp.getState().appendEvents(sid, [
    {
     kind: "user",

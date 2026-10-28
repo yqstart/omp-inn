@@ -113,6 +113,8 @@ function streamingArgsPreview(partialArgs: string): string {
 }
 
 const folds = new Map<string, Fold>();
+// 消息可能在同一毫秒到达；序号在折叠态回收后也不能重用。
+let userEchoSequence = 0;
 /** 单测隔离用：清掉按会话累积的流式折叠态。 */
 export function __resetFolds() {
  folds.clear();
@@ -158,7 +160,7 @@ export function frameToViewMsgs(sid: string, frame: Record<string, unknown>, dic
     // 前缀 `u-echo-` = 「待确认的实时回显」：omp 收到 prompt 后会把用户消息回显回来，
     // 而 Composer 发送时已乐观回显过一条 `u-local-*`。mergeViewMsgs 按同文本把本地行
     // 换成这条（换 id），不翻倍——「发一次出现两条」就是这两条各渲染了一次。
-    id: `u-echo-${Date.now()}`,
+    id: `u-echo-${++userEchoSequence}`,
     text,
     mentions: [],
     ...(images.length > 0 ? { images } : {}),
