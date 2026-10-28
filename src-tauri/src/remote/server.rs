@@ -123,7 +123,7 @@ async fn guard(
                 return api_error(StatusCode::TOO_MANY_REQUESTS, "RATE_LIMIT", "请求过于频繁");
             }
             let secure = auth::is_secure(req.headers(), peer);
-            req.extensions_mut().insert(AuthDevice { device, secure });
+            req.extensions_mut().insert(AuthDevice { device, secure, token });
         }
     }
 
@@ -135,10 +135,11 @@ async fn guard(
     res
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AuthDevice {
     pub device: DeviceView,
     pub secure: bool,
+    token: String,
 }
 
 async fn healthz() -> Json<Value> {
@@ -317,6 +318,13 @@ async fn handle_socket(ctx: Ctx, a: AuthDevice, socket: WebSocket) {
     let mut events = hub.subscribe();
     let mut revokes = hub.revocations();
     let mut shutdown = hub.shutdown_rx();
+    // 订阅后复核令牌，防止认证通过后、订阅之前发生撤销或令牌轮换。
+    if ctx.manager.device_id_for_token(&a.token).as_deref() != Some(a.device.id.as_str()) {
+        let _ = sink.send(Message::Close(Some(CloseFrame { code: 4401, reason: "revoked".into() }))).await;
+        hub.client_disconnected();
+        ctx.manager.emit_state(&ctx.app);
+        return;
+    }
     let hello = json!({"channel": "remote://hello", "payload": {"protocol": 1, "device": a.device}});
     let _ = sink.send(Message::Text(hello.to_string().into())).await;
     let mut ping = tokio::time::interval(Duration::from_secs(25));
@@ -328,6 +336,10 @@ async fn handle_socket(ctx: Ctx, a: AuthDevice, socket: WebSocket) {
             ev = events.recv() => {
                 match ev {
                     Ok(RemoteEvent { seq, channel, payload }) => {
+                        if ctx.manager.device_id_for_token(&a.token).as_deref() != Some(a.device.id.as_str()) {
+                            let _ = sink.send(Message::Close(Some(CloseFrame { code: 4401, reason: "revoked".into() }))).await;
+                            break;
+                        }
                         let msg = json!({"seq": seq, "channel": channel, "payload": payload});
                         if sink.send(Message::Text(msg.to_string().into())).await.is_err() { break; }
                     }
@@ -339,11 +351,13 @@ async fn handle_socket(ctx: Ctx, a: AuthDevice, socket: WebSocket) {
                 }
             }
             id = revokes.recv() => {
-                if let Ok(id) = id {
-                    if id == a.device.id {
+                match id {
+                    Ok(id) if id == a.device.id => {
                         let _ = sink.send(Message::Close(Some(CloseFrame { code: 4401, reason: "revoked".into() }))).await;
                         break;
                     }
+                    Err(_) => break,
+                    _ => {}
                 }
             }
             _ = shutdown.recv() => break,
