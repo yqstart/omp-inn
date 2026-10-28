@@ -207,12 +207,12 @@ impl RemoteManager {
             return Err(PairError::BadSecret);
         }
         p.consume();
-        drop(guard);
+        // 配对码的消费与清理共用锁，避免保存期间生成的新配对码被旧请求清除。
         let issued = {
             let mut store = self.inner.store.lock().unwrap();
             store.issue_token_persisted(existing, name, ip, ua)
         };
-        *self.inner.pairing.lock().unwrap() = None;
+        *guard = None;
         issued.map_err(|_| PairError::Storage)
     }
 
