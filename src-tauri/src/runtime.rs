@@ -226,6 +226,20 @@ pub struct RunningChild {
 
 pub type RuntimeMap = Arc<Mutex<HashMap<String, RunningChild>>>;
 
+/// 回收失效进程；无法确认退出时保留表项，避免恢复时与仍在运行的旧进程竞争。
+pub(crate) async fn stop_failed_child(r: &mut RunningChild) -> std::io::Result<()> {
+    if r.child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    match r.child.kill().await {
+        Ok(()) => Ok(()),
+        Err(e) => match r.child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            _ => Err(e),
+        },
+    }
+}
+
 /// 模型引用（精简：前端只需拼 selector = provider/id）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ModelRef {
@@ -877,6 +891,7 @@ async fn spawn_long_lived_inner<R: tauri::Runtime>(
     // （V34 探针实证：占位键通道收到全部帧、sid 通道一条都没有）。
     start_pump(
         app.clone(),
+        map.clone(),
         sid.clone(),
         reader,
         stdin,
@@ -900,6 +915,7 @@ async fn spawn_long_lived_inner<R: tauri::Runtime>(
 /// 与 map 的 key 解耦（create 的占位键会换名，见 [`spawn_long_lived`] 的说明）。
 fn start_pump<R: tauri::Runtime>(
     app: AppHandle<R>,
+    map: RuntimeMap,
     sid: String,
     mut reader: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     mut stdin: ChildStdin,
@@ -946,18 +962,17 @@ fn start_pump<R: tauri::Runtime>(
         // 不必等下一轮对话；新会话此刻还没有用户消息，等它第一条消息到达再补
         //（见 handle_frame 里的 is_user_message_frame 触发，详见 maybe_auto_title）。
         maybe_auto_title(session_file.as_deref(), &mut stdin, &mut auto_title).await;
-        loop {
+        let failure = 'pump: loop {
             tokio::select! {
                 w = rx.recv() => {
                     match w {
-                        Some(line) if line.is_empty() => break, // kill 哨兵
+                        Some(line) if line.is_empty() => break None, // kill 哨兵
                         Some(line) => { pending.push_back(line); }
-                        None => break,
+                        None => break None,
                     }
                     while let Some(l) = pending.pop_front() {
                         if let Err(e) = stdin.write_all(l.as_bytes()).await {
-                            emit_status(&app, &status, &activity, "error", Some(&format!("写入失败：{e}")));
-                            break;
+                            break 'pump Some(("error", format!("写入失败：{e}")));
                         }
                     }
                     let _ = stdin.flush().await;
@@ -986,9 +1001,23 @@ fn start_pump<R: tauri::Runtime>(
                             handle_frame(&app, &sid, &evt, &status, &full, &mut stdin, &activity, &mut auto_title, &mut sync_clock, session_file.as_deref()).await;
                         }
                         _ => {
-                            emit_status(&app, &status, &activity, "exited", Some("omp 进程已退出"));
-                            break;
+                            break Some(("exited", "omp 进程已退出".to_string()));
                         }
+                    }
+                }
+            }
+        };
+        if let Some((state, detail)) = failure {
+            // 先关闭接收端，阻止新请求投递到已经失效的泵。
+            rx.close();
+            let mut running = map.lock().await;
+            // 同一 sid 可能已由新进程接管；活动态对象是进程实例的唯一身份。
+            if running.get(&sid).is_some_and(|r| Arc::ptr_eq(&r.activity, &activity)) {
+                emit_status(&app, &status, &activity, state, Some(&detail));
+                if let Some(old) = running.get_mut(&sid) {
+                    // stdout 关闭不保证子进程已退出；无法确认退出时保留失效表项供重试。
+                    if stop_failed_child(old).await.is_ok() {
+                        running.remove(&sid);
                     }
                 }
             }

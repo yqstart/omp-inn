@@ -43,6 +43,8 @@ pub struct AppState {
     /// 列表行「运行中」标记不另存 map：判据是进程表内活动态（`activity_is_busy`），
     /// 见 `running_snapshot`——单一真值，避免「打开过就一直转圈」。
     pub runtime: crate::runtime::RuntimeMap,
+    /// 同一会话的恢复共用一次启动；弱引用避免长期保留已结束的锁。
+    pub runtime_recovery: Mutex<HashMap<String, std::sync::Weak<Mutex<Option<String>>>>>,
     /// V42 右栏「终端」页签：终端 id → PTY 句柄（前端打开 / 关闭驱动，见 `pty.rs`）。
     pub terminals: crate::pty::TerminalMap,
     /// V14 工作区「提交并推送」：cwd → 任务句柄（同一工作区拒绝重入，不同工作区可并行，
@@ -1771,6 +1773,7 @@ async fn build_new_session_view(state: &AppState, sid: &str, sfile: &str, cwd: &
 /// 打开（或聚焦）一个聊天会话：已有长驻进程直接返回视图；否则 `omp --resume` 拉起。
 #[tauri::command]
 pub async fn open_session(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<SessionView, CmdError> {
+    let id = ensure_session_runtime(&app, &state, &id).await?;
     // 已有长驻进程直接聚焦（含刚建好、尚未落盘的新会话）
     let rt = state.runtime.lock().await.get(&id).map(|r| (r.cwd.clone(), r.created_ms));
     if let Some((rt_cwd, rt_created)) = rt {
@@ -1783,10 +1786,47 @@ pub async fn open_session(app: AppHandle, state: State<'_, AppState>, id: String
         let session_ts = if head.timestamp == 0 { rt_created } else { head.timestamp };
         return Ok(build_session_view(&state, &id, &head.title, head.first_user_text.as_deref(), session_cwd, session_ts).await);
     }
-    // 否则 resume 长驻
-    let head = spawn_session_runtime(&app, &state, &id).await?;
-    // 历史回放由前端分页读取（实时增量经事件 pump）
-    Ok(build_session_view(&state, &head.id, &head.title, head.first_user_text.as_deref(), head.cwd.clone(), head.timestamp).await)
+    Err(cmd_err("NOT_RUNNING", "会话进程已退出，请重试".into(), None))
+}
+
+/// 确保会话进程存在。并发请求共享恢复结果，包括上游返回的新身份。
+async fn ensure_session_runtime<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
+    id: &str,
+) -> Result<String, CmdError> {
+    let gate = {
+        let mut gates = state.runtime_recovery.lock().await;
+        gates.retain(|_, weak| weak.strong_count() > 0);
+        match gates.get(id).and_then(std::sync::Weak::upgrade) {
+            Some(gate) => gate,
+            None => {
+                let gate = std::sync::Arc::new(Mutex::new(None));
+                gates.insert(id.to_string(), std::sync::Arc::downgrade(&gate));
+                gate
+            }
+        }
+    };
+    let mut recovered = gate.lock().await;
+    let mut running = state.runtime.lock().await;
+    if let Some(real_id) = recovered.as_ref() {
+        if running.get(real_id).is_some_and(|r| !r.tx.is_closed()) {
+            return Ok(real_id.clone());
+        }
+    }
+    if running.get(id).is_some_and(|r| !r.tx.is_closed()) {
+        return Ok(id.to_string());
+    }
+    // 接收端已关闭而事件泵尚未清理时，先回收旧进程，避免恢复与其竞争会话文件。
+    if let Some(old) = running.get_mut(id) {
+        crate::runtime::stop_failed_child(old).await
+            .map_err(|e| cmd_err("RUNTIME_STOP", format!("无法确认旧会话进程已退出：{e}"), None))?;
+        running.remove(id);
+    }
+    drop(running);
+    let real_id = spawn_session_runtime(app, state, id).await?.id;
+    *recovered = Some(real_id.clone());
+    Ok(real_id)
 }
 
 /// resume 拉起一个没有长驻进程的会话并登记进 `runtime` 表（`open_session` 的 spawn 段
@@ -2145,10 +2185,8 @@ pub async fn rename_session(
     if name.is_empty() {
         return Err(cmd_err("BAD_ARG", "会话名不能为空".into(), None));
     }
-    // 改名要活跃进程：不在就先 resume 拉起（与 send_prompt 的自动恢复同口径）
-    if state.runtime.lock().await.get(&id).is_none() {
-        spawn_session_runtime(&app, &state, &id).await?;
-    }
+    // 改名要活跃进程：与打开和发送共用单飞恢复。
+    let id = ensure_session_runtime(&app, &state, &id).await?;
     let req = serde_json::json!({
         "id": format!("rn-{}", chrono::Utc::now().timestamp_millis()),
         "type": "set_session_name",
@@ -2437,14 +2475,14 @@ pub(crate) async fn send_prompt<R: tauri::Runtime>(
     images: Option<Vec<ImageAttachment>>,
 ) -> Result<(), CmdError> {
     let map = state.runtime.clone();
-    let mut tx = map.lock().await.get(id).map(|r| r.tx.clone());
+    let mut tx = map.lock().await.get(id).filter(|r| !r.tx.is_closed()).map(|r| r.tx.clone());
     if tx.is_none() && kind == "prompt" {
         // 进程不在了（闲置回收 / 意外退出）：resume 拉起再发——「发消息」是用户的正常
         // 入口，不该因为后台回收而失败（回收只发生在 idle，这里补一次就是无缝的）。
         // steer / follow_up 不代偿：没有进行中的轮次时这两个语义本身不成立，按原样报错。
         // resume 可能发生身份漂移（omp 的保护性 fork，见 spawn_session_runtime 的注释）：
         // 消息按**真实身份**发给新进程，否则 get(id) 落空、误报「会话未启动」。
-        let real_id = spawn_session_runtime(app, state, id).await?.id;
+        let real_id = ensure_session_runtime(app, state, id).await?;
         tx = map.lock().await.get(&real_id).map(|r| r.tx.clone());
     }
     let Some(tx) = tx else {
@@ -2467,8 +2505,17 @@ pub(crate) async fn send_prompt<R: tauri::Runtime>(
     if !imgs.is_empty() {
         req["images"] = serde_json::Value::Array(imgs);
     }
-    tx.send(format!("{}\n", serde_json::to_string(&req).unwrap()))
-        .map_err(|_| cmd_err("RPC_IO", "发送失败，进程可能已退出".into(), None))?;
+    let line = format!("{}\n", serde_json::to_string(&req).unwrap());
+    if let Err(unsent) = tx.send(line) {
+        // 只有通道拒绝投递时才重试，避免对已接收的消息重复发送。
+        if kind != "prompt" {
+            return Err(cmd_err("RPC_IO", "发送失败，进程可能已退出".into(), None));
+        }
+        let real_id = ensure_session_runtime(app, state, id).await?;
+        let retry = map.lock().await.get(&real_id).map(|r| r.tx.clone())
+            .ok_or_else(|| cmd_err("NOT_RUNNING", "会话进程已退出，请重试".into(), None))?;
+        retry.send(unsent.0).map_err(|_| cmd_err("RPC_IO", "发送失败，进程可能已退出".into(), None))?;
+    }
     let _ = app;
     Ok(())
 }
@@ -2994,6 +3041,7 @@ pub fn load_state<R: tauri::Runtime>(app: &AppHandle<R>) -> AppState {
         constraints_edit: Mutex::new(()),
         extensions_edit: Mutex::new(()),
         runtime: std::sync::Arc::new(Mutex::new(HashMap::new())),
+        runtime_recovery: Mutex::new(HashMap::new()),
         terminals: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         commit_tasks: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         omp_update_task: std::sync::Arc::new(std::sync::Mutex::new(None)),

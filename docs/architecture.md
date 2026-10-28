@@ -13,6 +13,7 @@
 - **重启即换进程**：执行模式（权限档）在 idle 时改档要重启 runtime；running 时挂起到本轮结束。
 - **闲置回收**：每 60s 一轮，`ACT_IDLE` 且已落盘、闲置 ≥30 分钟才 kill；重新打开 / 发消息自动 resume。
   - `agent_end{isTerminal:false, awaitingAsyncWork:true}` 折算 `idle-awaiting`，回收跳过。
+- 会话进程异常退出时按进程实例清理失效表项；打开、发送和改名共用会话级单飞恢复。发送仅在通道拒绝投递时重试，已入队消息不自动重发。
 
 ## 会话身份
 
