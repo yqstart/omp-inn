@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionView } from "@shared/types";
+import type * as SessionEventsModule from "../../lib/useSessionEvents";
 import { useApp } from "../../stores/app";
 import { TEXT, fmt } from "../../lib/locale";
 
@@ -21,6 +22,18 @@ import { TEXT, fmt } from "../../lib/locale";
 /** 发送语义要断言 IPC 参数：spy 替身；其余命令给最小可用返回值。 */
 const { apiMock } = vi.hoisted(() => ({
  apiMock: {
+  // 发送前恢复进程会调一次 open_session：给回同身份的视图，走「没分叉」分支
+  openSession: vi.fn(async (id: string) => ({
+   id,
+   projectId: null,
+   title: "聊一聊",
+   cwd: "/w/alpha",
+   timestamp: 0,
+   archived: false,
+   corrupt: false,
+   note: null,
+   running: false,
+  })),
   sendMessage: vi.fn(async (_sid: string, _text: string, _images?: unknown) => undefined),
   steerMessage: vi.fn(async (_sid: string, _text: string, _images?: unknown) => undefined),
   followUpMessage: vi.fn(async (_sid: string, _text: string, _images?: unknown) => undefined),
@@ -73,6 +86,13 @@ vi.mock("@shared/api", () => ({
 
 const { openerMock } = vi.hoisted(() => ({ openerMock: { openPath: vi.fn(async () => undefined) } }));
 vi.mock("@tauri-apps/plugin-opener", () => openerMock);
+
+// 事件通道只在真实 Tauri 里注册；这里不跑 useSessionEvents，等待监听会一直悬到超时。
+// Composer 用例只验发送语义，直接视为「监听已就绪」（监听行为由 useSessionEvents 自己的用例覆盖）。
+vi.mock("../../lib/useSessionEvents", async (importOriginal) => ({
+ ...(await importOriginal<typeof SessionEventsModule>()),
+ waitForSessionListeners: async () => {},
+}));
 
 import { Composer } from "./Composer";
 import { pushHistory } from "../../lib/promptHistory";

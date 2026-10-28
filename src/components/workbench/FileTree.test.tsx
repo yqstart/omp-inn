@@ -91,6 +91,9 @@ beforeEach(() => {
   locale: "zh-CN",
   activeSessionId: "s1",
   drafts: {},
+  // 引用走「待插入」队列：上一个用例遗留的条目会让新引用排进队列、断言读到旧值
+  pendingReference: null,
+  pendingReferenceQueue: [],
   composerFocusSeq: 0,
  });
  container = document.createElement("div");

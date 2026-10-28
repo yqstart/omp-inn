@@ -255,7 +255,12 @@ describe("划选浮条", () => {
   await act(async () => {
    quote?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   });
-  expect(useApp.getState().draftOf(SID)).toBe("旧草稿\n\n> 你好世界\n\n");
+  // 草稿编辑器非受控：引用先写「待插入」通道，由 Composer 消费后落进草稿
+  expect(useApp.getState().pendingReference).toMatchObject({
+   sessionId: SID,
+   kind: "quote",
+   text: "> 你好世界",
+  });
   // 动作执行后浮条关闭
   expect(container.querySelector(`button[aria-label="${TEXT[useApp.getState().locale].selQuote}"]`)).toBeNull();
   await act(async () => {
