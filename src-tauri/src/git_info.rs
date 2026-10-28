@@ -11,6 +11,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 
 /// 单条 git 查询超时：大仓库 `status` 可能很慢，超时按未知降级，不卡 UI。
 const GIT_TIMEOUT: Duration = Duration::from_secs(4);
@@ -29,20 +30,87 @@ pub(crate) async fn run_git_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> Result<String, String> {
-    let fut = tokio::process::Command::new(git)
-        .arg("-C")
+    let mut cmd = tokio::process::Command::new(git);
+    cmd.arg("-C")
         .arg(dir)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
-        .output();
-    match tokio::time::timeout(timeout, fut).await {
-        Err(_) => Err("git 命令超时".into()),
-        Ok(Err(e)) => Err(e.to_string()),
-        Ok(Ok(out)) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
-        Ok(Ok(out)) => {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().process_group(0);
+    }
+    #[cfg(windows)]
+    let mut child = {
+        // 先挂起进程，加入作业对象后才恢复；即使 Git 先退出，作业仍能停止其后代。
+        use process_wrap::tokio::{CommandWrap, JobObject, KillOnDrop};
+        let mut wrapped = CommandWrap::from(cmd);
+        wrapped.wrap(JobObject).wrap(KillOnDrop);
+        wrapped.spawn().map_err(|e| e.to_string())?
+    };
+    #[cfg(not(windows))]
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    let pid = child.id();
+    #[cfg(windows)]
+    let mut stdout = child.stdout().take().ok_or("无法读取 git 标准输出")?;
+    #[cfg(not(windows))]
+    let mut stdout = child.stdout.take().ok_or("无法读取 git 标准输出")?;
+    #[cfg(windows)]
+    let mut stderr = child.stderr().take().ok_or("无法读取 git 错误输出")?;
+    #[cfg(not(windows))]
+    let mut stderr = child.stderr.take().ok_or("无法读取 git 错误输出")?;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    // 同时读取两条管道，避免 git 输出填满管道而无法退出；限时覆盖子进程和管道读取。
+    #[cfg(windows)]
+    let result = tokio::time::timeout(timeout, async {
+        // 首次只等直接子进程；超时后的作业对象 wait 要能等待全部后代退出。
+        // 安全：这里只等待原生子进程，不改变作业对象；Tokio 会缓存退出状态，包装层仍可再次等待。
+        let native = unsafe { child.try_inner_child_mut() }
+            .ok_or_else(|| std::io::Error::other("无法读取 git 子进程"))?;
+        tokio::try_join!(native.wait(), stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))
+    }).await;
+    #[cfg(not(windows))]
+    let result = tokio::time::timeout(timeout, async {
+        tokio::try_join!(child.wait(), stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))
+    }).await;
+    match result {
+        Ok(Ok((status, _, _))) if status.success() => Ok(String::from_utf8_lossy(&out).to_string()),
+        Ok(Ok(_)) => {
+            let err = String::from_utf8_lossy(&err).trim().to_string();
             Err(if err.is_empty() { "git 命令失败".into() } else { err })
+        }
+        failure => {
+            // 超时或读管道失败时先停止整个进程树，再回收 git，避免返回后继续修改仓库。
+            #[cfg(not(windows))]
+            if let Some(pid) = pid {
+                if child.id().is_some() {
+                    crate::proc::force_kill_group(pid);
+                } else {
+                    // 父进程可能已退出但后代仍持有管道；只对原进程组发信号，不回退到单 PID。
+                    #[cfg(unix)]
+                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+                }
+            }
+            let killed = child.start_kill();
+            // 管道也必须关闭：父进程先退出时，后代仍可能持有输出句柄。
+            let waited = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::try_join!(child.wait(), stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))
+            }).await;
+            let reason = match failure {
+                Err(_) => "git 命令超时".to_string(),
+                Ok(Err(e)) => e.to_string(),
+                Ok(Ok(_)) => unreachable!(),
+            };
+            match (killed, waited) {
+                (Ok(()), Ok(Ok(_))) => Err(reason),
+                _ => Err(format!("{reason}；无法确认 git 进程已退出")),
+            }
         }
     }
 }

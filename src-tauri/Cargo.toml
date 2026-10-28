@@ -40,6 +40,7 @@ arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 
 [target.'cfg(windows)'.dependencies]
+process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "job-object", "kill-on-drop"] }
 # 目录身份：std 的 volume_serial_number / file_index 仍是 unstable（feature windows_by_handle），
 # 改用稳定的 Win32 API 取卷序列号 + 文件索引。
 windows-sys = { version = "0.61", features = [
