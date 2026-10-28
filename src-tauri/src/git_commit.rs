@@ -31,7 +31,7 @@ use crate::commands::{cmd_err, AppState, CmdError};
 use crate::commit_msg;
 use crate::git_info::{dir_exists, git_bin, run_git};
 use crate::git_ops;
-use crate::proc::{force_kill_group, login_path};
+use crate::proc::{force_kill_group, force_kill_group_checked, login_path};
 
 // ---------- 任务表与取消 ----------
 
@@ -382,6 +382,15 @@ pub(crate) async fn pump_child(
     mut child: tokio::process::Child,
     pid: Option<u32>,
     cancel: Option<&CancelToken>,
+    on_line: impl FnMut(&str, OutStream),
+) -> RunSignals {
+    pump_child_inner(&mut child, pid, cancel, on_line).await
+}
+
+async fn pump_child_inner(
+    child: &mut tokio::process::Child,
+    pid: Option<u32>,
+    cancel: Option<&CancelToken>,
     mut on_line: impl FnMut(&str, OutStream),
 ) -> RunSignals {
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout piped")).lines();
@@ -408,11 +417,11 @@ pub(crate) async fn pump_child(
         tokio::select! {
             _ = cancel_wait, if !canceled => {
                 canceled = true;
-                // 先杀直接子进程（SIGKILL），再打进程组擦掉 git / 模型子进程。
-                let _ = child.kill().await;
+                // 先停止进程树，再回收直接子进程；Windows 依赖父进程定位后代。
                 if let Some(pid) = pid {
                     force_kill_group(pid);
                 }
+                let _ = child.kill().await;
             }
             line = stdout.next_line(), if stdout_open => match line {
                 Ok(Some(l)) => {
@@ -448,6 +457,28 @@ pub(crate) async fn pump_child(
     }
     let code = child.wait().await.ok().and_then(|s| s.code());
     RunSignals { canceled, code, out_tail, err_tail }
+}
+
+/// 超时后仍持有子进程句柄，先停止进程树，再等待直接子进程回收。
+async fn pump_child_with_timeout(
+    mut child: tokio::process::Child,
+    pid: Option<u32>,
+    cancel: Option<&CancelToken>,
+    timeout: Duration,
+    on_line: impl FnMut(&str, OutStream),
+) -> Result<RunSignals, &'static str> {
+    match tokio::time::timeout(timeout, pump_child_inner(&mut child, pid, cancel, on_line)).await {
+        Ok(signals) => Ok(signals),
+        Err(_) => {
+            let tree_signaled = pid.is_some_and(force_kill_group_checked);
+            let _ = child.start_kill();
+            match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+                Ok(Ok(_)) if tree_signaled => Err(""),
+                Ok(Ok(_)) => Err("；无法确认进程树已退出"),
+                _ => Err("；无法确认子进程已退出"),
+            }
+        }
+    }
 }
 
 /// 起一个 git 子进程：新进程组（取消打 `-pid`）、登录 PATH、`kill_on_drop`、
@@ -568,14 +599,9 @@ pub(crate) async fn run_git_commit(
     let args = ["commit", "--cleanup=strip", "-F", "-"];
     let child = spawn_git(git, cwd, &args, Some(message)).map_err(|e| format!("启动 git commit 失败：{e}"))?;
     let pid = child.id();
-    match tokio::time::timeout(COMMIT_TIMEOUT, pump_child(child, pid, Some(cancel), |l, s| on_line(l, s))).await {
+    match pump_child_with_timeout(child, pid, Some(cancel), COMMIT_TIMEOUT, |l, s| on_line(l, s)).await {
         Ok(signals) => Ok(signals),
-        Err(_) => {
-            if let Some(pid) = pid {
-                force_kill_group(pid);
-            }
-            Err("git commit 超时（120s）".to_string())
-        }
+        Err(detail) => Err(format!("git commit 超时（120s）{detail}")),
     }
 }
 
@@ -615,14 +641,9 @@ pub(crate) async fn run_git_push(
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let child = spawn_git(git, cwd, &refs, None).map_err(|e| (format!("启动 git push 失败：{e}"), None))?;
     let pid = child.id();
-    let signals = match tokio::time::timeout(PUSH_TIMEOUT, pump_child(child, pid, Some(cancel), |l, s| on_line(l, s))).await {
+    let signals = match pump_child_with_timeout(child, pid, Some(cancel), PUSH_TIMEOUT, |l, s| on_line(l, s)).await {
         Ok(s) => s,
-        Err(_) => {
-            if let Some(pid) = pid {
-                force_kill_group(pid);
-            }
-            return Err(("git push 超时（120s）".to_string(), None));
-        }
+        Err(detail) => return Err((format!("git push 超时（120s）{detail}"), None)),
     };
     if signals.canceled {
         return Err(("推送已取消".to_string(), None));
@@ -796,14 +817,11 @@ pub async fn generate_commit_message(
                 let _ = on_event.send(CommitEvent::Line { text: text.to_string() });
             }
         };
-        let signals = match tokio::time::timeout(GEN_TIMEOUT, pump_child(child, pid, Some(&cancel), &mut log)).await {
+        let signals = match pump_child_with_timeout(child, pid, Some(&cancel), GEN_TIMEOUT, &mut log).await {
             Ok(s) => s,
-            Err(_) => {
-                if let Some(pid) = pid {
-                    force_kill_group(pid);
-                }
+            Err(detail) => {
                 let mut outcome = CommitOutcome::new(CommitPhase::Failed);
-                outcome.error = Some("生成提交信息超时（180s）".into());
+                outcome.error = Some(format!("生成提交信息超时（180s）{detail}"));
                 outcome.hint = Some("可以改用「完整提交（含 CHANGELOG）」".into());
                 let _ = on_event.send(CommitEvent::Exit { outcome });
                 release(&tasks, &cwd_key, seq);
@@ -950,14 +968,11 @@ pub async fn start_full_commit(
         let mut log = |text: &str, _s: OutStream| {
             let _ = on_event.send(CommitEvent::Line { text: text.to_string() });
         };
-        let signals = match tokio::time::timeout(FULL_TIMEOUT, pump_child(child, pid, Some(&cancel), &mut log)).await {
+        let signals = match pump_child_with_timeout(child, pid, Some(&cancel), FULL_TIMEOUT, &mut log).await {
             Ok(s) => s,
-            Err(_) => {
-                if let Some(pid) = pid {
-                    force_kill_group(pid);
-                }
+            Err(detail) => {
                 outcome.phase = CommitPhase::Failed;
-                outcome.error = Some("omp commit 超时（600s）".into());
+                outcome.error = Some(format!("omp commit 超时（600s）{detail}"));
                 outcome.hint = Some("可以改用快速提交".into());
                 let _ = on_event.send(CommitEvent::Exit { outcome });
                 release(&tasks, &cwd_key, seq);

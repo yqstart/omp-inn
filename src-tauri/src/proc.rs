@@ -10,10 +10,16 @@ use std::time::Duration;
 /// SIGKILL 进程组（负 pid）；组不存在（不是组长）时退回单进程。
 #[cfg(unix)]
 pub(crate) fn force_kill_group(pid: u32) {
+    let _ = force_kill_group_checked(pid);
+}
+
+/// 尝试停止进程组；返回值只表示进程组信号是否发送成功。
+#[cfg(unix)]
+pub(crate) fn force_kill_group_checked(pid: u32) -> bool {
     unsafe {
-        if libc::kill(-(pid as i32), libc::SIGKILL) != 0 {
-            libc::kill(pid as i32, libc::SIGKILL);
-        }
+        if libc::kill(-(pid as i32), libc::SIGKILL) == 0 { return true; }
+        libc::kill(pid as i32, libc::SIGKILL);
+        false
     }
 }
 
@@ -24,13 +30,18 @@ pub(crate) fn force_kill_group(pid: u32) {
 /// `taskkill` 是 Windows 自带命令，不额外引 windows crate；隐藏控制台窗口。
 #[cfg(windows)]
 pub(crate) fn force_kill_group(pid: u32) {
+    let _ = force_kill_group_checked(pid);
+}
+
+#[cfg(windows)]
+pub(crate) fn force_kill_group_checked(pid: u32) -> bool {
     use std::os::windows::process::CommandExt;
     /// 不弹黑色控制台窗口（GUI 进程里 spawn 控制台程序时的默认行为）。
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     if pid == 0 {
-        return;
+        return false;
     }
-    let _ = std::process::Command::new("taskkill")
+    std::process::Command::new("taskkill")
         .arg("/PID")
         .arg(pid.to_string())
         .arg("/T")
@@ -39,12 +50,17 @@ pub(crate) fn force_kill_group(pid: u32) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
-        .status();
+        .status().is_ok_and(|status| status.success())
 }
 
 #[cfg(all(not(unix), not(windows)))]
 pub(crate) fn force_kill_group(pid: u32) {
     let _ = pid;
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub(crate) fn force_kill_group_checked(_pid: u32) -> bool {
+    false
 }
 
 /// 登录 shell 的 PATH（一次性探测 + 缓存）。
