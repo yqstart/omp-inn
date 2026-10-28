@@ -393,32 +393,59 @@ export async function openSessionWithHistory(
    localByKey.set(key, arr);
   };
   for (const m of cur_list) {
-   if (historyIds.has(m.id)) continue;
+   if (historyIds.has(m.id) || previous?.records[m.id] === m) continue;
    pushLocal(localPairKey(m), m.id);
   }
-  const fresh = historyRows.filter((m) => {
-   if (seen.has(m.id)) return false;
+  // 在一份快照上按历史顺序合并：未配对的旧历史必须先于请求期间到达的实时行。
+  // 已加载的更早历史留在页前；实时行与历史锚点之间的原有相对顺序保留。
+  const byId = new Map(cur_list.map((m) => [m.id, m]));
+  const matched = new Map<string, number>();
+  const rows = historyRows.map((m, index) => {
+   const exact = byId.get(m.id);
+   if (exact) {
+    matched.set(exact.id, index);
+    return m.kind === "tool" && exact.kind === "tool" ? mergeToolCard(m, exact) : exact;
+   }
    const key = historyPairKey(m);
-   if (key) {
-    const arr = localByKey.get(key);
-    const localId = arr?.shift();
-    if (localId) {
-     if (arr && arr.length === 0) localByKey.delete(key);
-     // 每次替换都读最新快照：一轮历史里替换多条本地消息时，基于旧快照的 set
-     // 会把上一次替换覆盖回去（第一条又变回本地版 → 重复显示）。
-     const st = useApp.getState();
-     st.set({
-      eventsBySession: {
-       ...st.eventsBySession,
-       [realId]: (st.eventsBySession[realId] ?? []).map((x) => (x.id === localId ? m : x)),
-      },
-     });
-     return false;
+   const localId = key ? localByKey.get(key)?.shift() : undefined;
+   if (localId) matched.set(localId, index);
+   return m;
+  });
+  const earlier: ViewMsg[] = [];
+  const trailing: ViewMsg[] = [];
+  const before = new Map<number, ViewMsg[]>();
+  const after = new Map<number, ViewMsg[]>();
+  let anchor: number | null = null;
+  const lastAnchor = cur_list.reduce((last, m, index) => matched.has(m.id) ? index : last, -1);
+  for (const [position, m] of cur_list.entries()) {
+   const index = matched.get(m.id);
+   if (index !== undefined) {
+    anchor = index;
+   } else if (previous?.records[m.id] === m && !historyIds.has(m.id) && !gap) {
+    earlier.push(m);
+   } else if (anchor !== null && position < lastAnchor) {
+    const bucket = after.get(anchor) ?? [];
+    bucket.push(m);
+    after.set(anchor, bucket);
+   } else {
+    // 没有后续锚点时，仅在时间明确早于某条历史时插入其前；否则保留在最新历史之后。
+    const next = m.at == null ? -1 : rows.findIndex((row, i) =>
+     (anchor === null || i > anchor) && row.at != null && row.at > m.at!,
+    );
+    if (next < 0) trailing.push(m);
+    else {
+     const bucket = before.get(next) ?? [];
+     bucket.push(m);
+     before.set(next, bucket);
     }
    }
-   return true;
+  }
+  const merged = [...earlier];
+  rows.forEach((row, index) => {
+   merged.push(...(before.get(index) ?? []), row, ...(after.get(index) ?? []));
   });
-  if (fresh.length > 0) useApp.getState().appendEvents(realId, fresh);
+  merged.push(...trailing);
+  cur.set({ eventsBySession: { ...cur.eventsBySession, [realId]: merged } });
   // 重开时保留已经向前加载过的游标，避免重复加载已在缓存中的页。
   const latest = useApp.getState();
   const oldPage = latest.historyPages[realId];
