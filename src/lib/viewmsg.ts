@@ -156,7 +156,7 @@ function lineAtOf(o: Record<string, unknown>): number | undefined {
  * 所有 id 均由 jsonl 行 id / toolCallId 稳定派生（不再随机），
  * 重复打开同一会话可按 id 去重，不会叠历史。
  */
-export function viewMsgsFromJsonlLines(lines: unknown[], t: Text): ViewMsg[] {
+export function viewMsgsFromJsonlLines(lines: unknown[], t: Text, page?: { before: number | null; lineOffsets?: number[] }): ViewMsg[] {
  const arr = Array.isArray(lines) ? lines : [];
  type CallMeta = { name: string; args: Record<string, unknown>; intent: string; streamIndex: number };
  type ResultMeta = { text: string; full?: string; isError: boolean };
@@ -291,7 +291,8 @@ export function viewMsgsFromJsonlLines(lines: unknown[], t: Text): ViewMsg[] {
  arr.forEach((line, li) => {
   if (!line || typeof line !== "object") return;
   const o = line as Record<string, unknown>;
-  const lid = lineIdOf(line, `n${li}`);
+  const offset = page?.lineOffsets?.[li];
+  const lid = lineIdOf(line, offset === undefined ? `n${li}` : `offset-${offset}`);
   // 本行的时间（v2 轮时长行用）：随消息归一一起带上，缺省即不产时长
   const at = lineAtOf(o);
   if (o.type === "message") {
@@ -396,7 +397,7 @@ export function viewMsgsFromJsonlLines(lines: unknown[], t: Text): ViewMsg[] {
   // 「标题：xxx」分隔线就是噪音（用户实测：一轮结束后重开会话，流尾凭空多出一行标题）。
   if (o.type === "title_change") return;
   if (o.type === "model_change" || o.type === "thinking_level_change") {
-   if (!userSeen) return;
+   if (!userSeen && page?.before == null) return;
    const label =
     o.type === "model_change"
      ? t.dividerModel
@@ -406,6 +407,7 @@ export function viewMsgsFromJsonlLines(lines: unknown[], t: Text): ViewMsg[] {
     id: `d:${lid}`,
     divider: o.type === "model_change" ? "model" : "thinking",
     text: label,
+    ...(!userSeen ? { pendingPriorUser: true } : {}),
     ...(at != null ? { at } : {}),
    });
    return;

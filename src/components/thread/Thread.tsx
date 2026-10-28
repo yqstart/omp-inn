@@ -5,6 +5,7 @@ import { fmt } from "../../lib/locale";
 import { useText } from "../../lib/useText";
 import { isRemoteClient } from "@shared/remote";
 import { openBtwPanel } from "../../lib/btw";
+import { loadEarlierHistory, openSessionWithHistory } from "../../lib/sessionOpen";
 import { buildThreadLayout } from "../../lib/threadLayout";
 import { buildTurnRail, turnJumpTop, type TurnRailItem } from "../../lib/turnRail";
 import { NEAR_BOTTOM_PX } from "../../lib/threadScroll";
@@ -40,7 +41,7 @@ function prefersReducedMotion(): boolean {
 }
 
 export function Thread() {
- const { projects, activeSessionId, eventsBySession, statusBySession, threadLimitSid, threadLimit, growThreadLimit, sessions } =
+ const { projects, activeSessionId, eventsBySession, historyPages, statusBySession, threadLimitSid, threadLimit, growThreadLimit, sessions } =
   useApp();
  const t = useText();
  const cwd = sessions.find((s) => s.id === activeSessionId)?.cwd ?? "";
@@ -162,7 +163,8 @@ export function Thread() {
  );
  // 空态用模块级常量：`?? []` 每渲染都是新引用，会让下面的跟随 effect 依赖失效（eslint
  // exhaustive-deps 直接警告；语义上「没有事件」也不该被当成一次更新）。
- const events = (activeSessionId ? eventsBySession[activeSessionId] : undefined) ?? EMPTY_EVENTS;
+ const rawEvents = (activeSessionId ? eventsBySession[activeSessionId] : undefined) ?? EMPTY_EVENTS;
+ const events = useMemo(() => rawEvents.filter((m) => m.kind !== "divider" || !m.pendingPriorUser), [rawEvents]);
  // 流式进行中（后端状态帧 / 回读真值）：流尾没有「正在输出」的行时补一条「思考中…」。
  // 为什么必须有：慢模型（尤其推理档拉满）从发送到首个 delta 可能几十秒到几分钟，
  // 期间「只有用户那条消息」——用户看到的就是「发送后无任何反应」。指示行是纯派生渲染，
@@ -193,6 +195,7 @@ export function Thread() {
  // 首屏增量（MASTER §7）：只渲染最后 N 条，向上加载更多。窗口按会话重置。
  const limit = threadLimitSid === activeSessionId ? threadLimit : THREAD_PAGE;
  const hidden = Math.max(0, events.length - limit);
+ const historyPage = activeSessionId ? historyPages[activeSessionId] : undefined;
  const shown = hidden > 0 ? events.slice(-limit) : events;
  // 消息列布局（v2 §2.1）：相邻同类工具行聚合成摘要行 + 每轮末尾的时长行；
  // running 时跳过压在流尾的进行中轮次（没有时长可报）
@@ -202,7 +205,8 @@ export function Thread() {
   * 是否在渲染窗口里——历史页收起时标记仍在（`loaded=false`），点击先放页再落地，
   * 编号与完整会话一致（不随分页重排）。
   */
- const railItems = useMemo(() => buildTurnRail(events, hidden), [events, hidden]);
+ // 未加载完整历史时无法得知绝对轮次号，先不展示带编号的定位轨。
+ const railItems = useMemo(() => historyPage?.before != null ? [] : buildTurnRail(events, hidden), [events, hidden, historyPage?.before]);
  const turnByMsgId = useMemo(() => new Map(railItems.map((item) => [item.id, item.turn])), [railItems]);
  /** 未加载轮次的落地意图：放页是同步的 store 更新，等下一帧 DOM 里有锚点行后再跳。
   *  带上会话 id——放页与渲染之间切了会话，这条意图就作废（轮次号在新会话里没有意义）。 */
@@ -211,6 +215,16 @@ export function Thread() {
   const el = scroller.current;
   if (el) keepOffset.current = el.scrollHeight - el.scrollTop;
   growThreadLimit(THREAD_PAGE);
+ };
+ const loadEarlierPage = () => {
+  const sid = activeSessionId;
+  if (!sid) return;
+  void loadEarlierHistory(sid, () => {
+   if (useApp.getState().activeSessionId !== sid) return;
+   const el = scroller.current;
+   if (el) keepOffset.current = el.scrollHeight - el.scrollTop;
+   growThreadLimit(THREAD_PAGE);
+  });
  };
  /**
   * 把某一轮的锚点行滚到视口顶部（`turnJumpTop` 留 24px 呼吸位并夹住滚动范围）。
@@ -337,12 +351,12 @@ export function Thread() {
  }, [events, working, followBottom]);
  // 手机端没有项目 / 会话空态（移动壳自己渲染列表与引导）；只留正文区。
  if (isRemoteClient()) {
-  if (!activeSessionId || (events.length === 0 && !working)) {
+  if (!activeSessionId || (events.length === 0 && !working && historyPage?.before == null && !historyPage?.error && !historyPage?.skipped)) {
    return <div className="flex flex-1 items-center justify-center text-[13px] text-faint">{t.remoteThreadEmpty}</div>;
   }
  } else {
   if (projects.length === 0) return <ChatEmptyState kind="no-project" />;
-  if (!activeSessionId || (events.length === 0 && !working)) {
+  if (!activeSessionId || (events.length === 0 && !working && historyPage?.before == null && !historyPage?.error && !historyPage?.skipped)) {
    return <ChatEmptyState kind="no-session" hasSession={!!activeSessionId} />;
   }
  }
@@ -388,6 +402,27 @@ export function Thread() {
         </button>
        </div>
       )}
+      {hidden === 0 && historyPage?.before != null && (
+       <div className="mb-4 flex flex-col items-center gap-1">
+        <button
+         onClick={loadEarlierPage}
+         disabled={historyPage.loading}
+         className="cursor-pointer rounded-md border border-border px-3 py-1 text-[13px] text-muted transition-colors duration-100 hover:bg-hover hover:text-foreground disabled:opacity-50"
+        >
+         {historyPage.loading ? t.historyLoading : t.historyLoadEarlier}
+        </button>
+        {historyPage.error && <span className="text-[12px] text-warn">{fmt(t.historyLoadFailed, historyPage.error)}</span>}
+       </div>
+      )}
+      {hidden === 0 && historyPage?.before == null && historyPage?.error && (
+       <div className="mb-4 flex flex-col items-center gap-1">
+        <span className="text-[12px] text-warn">{fmt(t.historyLoadFailed, historyPage.error)}</span>
+        <button onClick={() => void openSessionWithHistory(activeSessionId)} className="cursor-pointer text-[13px] text-muted hover:text-foreground">
+         {t.historyRetry}
+        </button>
+       </div>
+      )}
+      {hidden === 0 && historyPage?.skipped && <div className="mb-4 text-center text-[12px] text-warn">{t.historyOversized}</div>}
       {layout.map((item, i) => {
        if (item.kind === "run") {
         // 聚合折叠行（v2）：命令批 / 编辑卡——展开仍是逐条 ToolRow

@@ -125,6 +125,8 @@ type AppState = {
  activeSessionId: string | null;
  /** 会话消息流（ViewMsg 归一；高频流式增量只改这里）。 */
  eventsBySession: Record<string, ViewMsg[]>;
+ /** 已加载历史的向前游标和读取状态；随会话历史缓存一并回收。 */
+ historyPages: Record<string, { before: number | null; end: number; records: Record<string, ViewMsg>; skipped: boolean; loading: boolean; error: string | null }>;
  /** 会话运行状态（`omp-status://<id>` 事件的落点；左栏状态点 / 通知用）。 */
  statusBySession: Record<string, SessionStatus>;
  /** 输入草稿（按会话隔离，内存态）。 */
@@ -660,6 +662,7 @@ export const useApp = create<AppState>((set, get) => ({
  sessions: [],
  activeSessionId: null,
  eventsBySession: {},
+ historyPages: {},
  statusBySession: {},
  drafts: {},
  attachmentsBySession: {},

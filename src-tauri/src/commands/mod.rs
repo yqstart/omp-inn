@@ -1785,7 +1785,7 @@ pub async fn open_session(app: AppHandle, state: State<'_, AppState>, id: String
     }
     // 否则 resume 长驻
     let head = spawn_session_runtime(&app, &state, &id).await?;
-    // 历史回放由前端 get_history 一次拉全量（实时增量经事件 pump）
+    // 历史回放由前端分页读取（实时增量经事件 pump）
     Ok(build_session_view(&state, &head.id, &head.title, head.first_user_text.as_deref(), head.cwd.clone(), head.timestamp).await)
 }
 
@@ -1841,38 +1841,71 @@ async fn spawn_session_runtime<R: tauri::Runtime>(
 
 // ---------- 会话消息与运行控制 ----------
 
-/// 回放上限：最多读 5000 行、最多收 2000 条（message/custom/title 系）。
+/// 每页读取上限：限制文件读取量和返回行数，游标指向下一页结束位置。
 const MAX_HISTORY_LINES: usize = 5000;
 const MAX_HISTORY_ENTRIES: usize = 2000;
+const MAX_HISTORY_BYTES: u64 = 128 * 1024 * 1024;
+const HISTORY_CHUNK_BYTES: u64 = 1024 * 1024;
 
 #[tauri::command]
-pub async fn get_history(state: State<'_, AppState>, id: String) -> Result<serde_json::Value, CmdError> {
-    // 读 jsonl 全量转 ViewMsg 载荷（前端经 viewmsg 归一）。
-    // 超过回放上限时 `truncated: true` 如实上报——绝不静默截断（前端在流尾注明）。
+pub async fn get_history(state: State<'_, AppState>, id: String, before: Option<u64>) -> Result<serde_json::Value, CmdError> {
+    use std::io::{Read, Seek, SeekFrom};
     let agent = state.agent_dir.lock().await.clone();
     let Some(path) = session_file_for(&agent, &id) else {
         return Err(cmd_err("NOT_FOUND", "会话文件不存在，可能已被删除".into(), None));
     };
-    let text = std::fs::read_to_string(&path).map_err(|_| cmd_err("CORRUPT", "会话文件已损坏，可删除".into(), None))?;
-    let mut out = vec![];
-    let mut truncated = false;
-    for (i, line) in text.lines().enumerate() {
-        if i >= MAX_HISTORY_LINES {
-            truncated = true;
-            break;
+    let mut file = std::fs::File::open(&path).map_err(|e| cmd_err("IO", format!("读取会话失败：{e}"), None))?;
+    let len = file.metadata().map_err(|e| cmd_err("IO", format!("读取会话信息失败：{e}"), None))?.len();
+    let end = before.unwrap_or(len);
+    if end > len {
+        return Err(cmd_err("BAD_ARG", "会话文件已变化，请重新打开会话".into(), None));
+    }
+    // 一般页只读 1 MiB；末行跨块时向前扩展，最多读取 128 MiB。
+    let mut start = end;
+    let mut chunks = Vec::new();
+    let mut newlines = 0usize;
+    let mut needed = 1usize;
+    while start > 0 && end - start < MAX_HISTORY_BYTES {
+        let size = HISTORY_CHUNK_BYTES.min(start).min(MAX_HISTORY_BYTES - (end - start));
+        start -= size;
+        file.seek(SeekFrom::Start(start)).map_err(|e| cmd_err("IO", format!("定位会话失败：{e}"), None))?;
+        let mut chunk = vec![0; size as usize];
+        file.read_exact(&mut chunk).map_err(|e| cmd_err("IO", format!("读取会话失败：{e}"), None))?;
+        if chunks.is_empty() && chunk.last() == Some(&b'\n') { needed = 2; }
+        newlines += chunk.iter().filter(|b| **b == b'\n').count();
+        chunks.push(chunk);
+        if newlines >= needed { break; }
+    }
+    let mut buf = Vec::with_capacity((end - start) as usize);
+    for chunk in chunks.into_iter().rev() { buf.extend(chunk); }
+    // 从完整行边界开始，避免截断 UTF-8 或 JSON；超长单行分段跳过并提示。
+    let first = if start == 0 { 0 } else {
+        match buf.iter().position(|b| *b == b'\n').filter(|p| *p + 1 < buf.len()) {
+            Some(p) => p + 1,
+            None => return Ok(serde_json::json!({ "lines": [], "lineOffsets": [], "before": start, "end": end, "skipped": true })),
         }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            // 只回放 message/custom/title_change 系
+    };
+    let mut out = vec![];
+    let mut offsets = vec![];
+    let mut pos = buf.len();
+    let mut scanned = 0;
+    while pos > first && scanned < MAX_HISTORY_LINES && out.len() < MAX_HISTORY_ENTRIES {
+        if buf[pos - 1] == b'\n' { pos -= 1; }
+        let line_end = pos;
+        let line_start = buf[first..pos].iter().rposition(|b| *b == b'\n').map_or(first, |p| first + p + 1);
+        pos = line_start;
+        scanned += 1;
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf[line_start..line_end]) {
             if matches!(v.get("type").and_then(|t| t.as_str()), Some("message" | "custom" | "title_change" | "model_change" | "thinking_level_change")) {
-                if out.len() >= MAX_HISTORY_ENTRIES {
-                    truncated = true;
-                    break;
-                }
                 out.push(v);
+                offsets.push(start + line_start as u64);
             }
         }
     }
-    Ok(serde_json::json!({ "lines": out, "truncated": truncated }))
+    out.reverse();
+    offsets.reverse();
+    let next = start + pos as u64;
+    Ok(serde_json::json!({ "lines": out, "lineOffsets": offsets, "before": if next > 0 { Some(next) } else { None }, "end": end }))
 }
 
 #[tauri::command]

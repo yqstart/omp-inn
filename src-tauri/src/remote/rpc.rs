@@ -60,6 +60,14 @@ struct IdArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HistoryArgs {
+    id: String,
+    #[serde(default)]
+    before: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HashArgs {
     hash: String,
 }
@@ -178,9 +186,9 @@ pub async fn dispatch(ctx: &Ctx, cmd: &str, args: Value) -> Result<Value, CmdErr
             json(out)
         }
         "get_history" => {
-            let a: IdArgs = serde_json::from_value(args).map_err(|e| bad(&format!("参数不合法：{e}")))?;
+            let a: HistoryArgs = serde_json::from_value(args).map_err(|e| bad(&format!("参数不合法：{e}")))?;
             let id = session_id(&a.id)?;
-            crate::commands::get_history(state, id).await
+            crate::commands::get_history(state, id, a.before).await
         }
         // 历史回放里的图片引用：只读 omp 的 `blobs/<sha256>`（hash 形状由后端校验），
         // 手机端也要能看到会话图片；写剪贴板 / 另存为不在远程白名单里。

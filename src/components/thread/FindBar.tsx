@@ -94,7 +94,7 @@ export function FindBar() {
  const hits = useMemo(() => {
   const needle = query.toLowerCase();
   if (!needle.trim()) return [];
-  return events.filter((m) => searchableText(m).toLowerCase().includes(needle)).map((m) => m.id);
+  return events.filter((m) => (m.kind !== "divider" || !m.pendingPriorUser) && searchableText(m).toLowerCase().includes(needle)).map((m) => m.id);
  }, [events, query]);
 
  // `idx` 只在输入 / 上一步下一步时改写，命中项变少（继续打字）后可能越界：

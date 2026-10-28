@@ -150,11 +150,9 @@ export const api = {
  /** 会话改名（V40）：RPC `set_session_name` 写 omp 真名（jsonl `title` 行）+ 清覆盖层备注。 */
  renameSession: (id: string, name: string) => call<SessionView>(IPC.renameSession, { id, name }),
  /**
-  * 历史回放（后端上限：5000 行 / 2000 条）。`lines` 是 **jsonl 原始行**
-  * （由 `viewMsgsFromJsonlLines` 归一）。`truncated` 为真时前端在流尾注明——
-  * 超限绝不静默丢内容。
+  * 历史回放从最新页开始，`before` 为下一页的字节游标；`lines` 是 jsonl 原始行。
   */
- getHistory: (id: string) => call<{ lines: unknown[]; truncated: boolean }>(IPC.getHistory, { id }),
+ getHistory: (id: string, before?: number) => call<{ lines: unknown[]; lineOffsets?: number[]; before?: number | null; end?: number; skipped?: boolean; truncated?: boolean }>(IPC.getHistory, { id, before }),
  sendMessage: (id: string, message: string, images?: ImageAttachment[]) =>
   call<void>(IPC.sendMessage, { id, message, images }),
  /** 流式中转向（`steer`）：在下一个工具调用边界生效，不砍掉进行中的工作。 */

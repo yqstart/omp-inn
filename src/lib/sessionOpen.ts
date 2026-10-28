@@ -4,6 +4,7 @@ import { useApp } from "../stores/app";
 import { fmt, TEXT } from "./locale";
 import { appendLocalNote } from "./localNote";
 import { viewMsgsFromJsonlLines } from "./viewmsg";
+import { mergeToolCard } from "./mergeEvents";
 import { syncSessionRuntime } from "./useSessionEvents";
 
 /**
@@ -29,6 +30,78 @@ const historyPairKey = (m: ViewMsg): string | null =>
    : m.kind === "thinking"
     ? `thinking\u0000${m.text}`
     : null;
+
+/** 向前读取一页，并把尚未出现的历史行放在现有消息之前。 */
+export async function loadEarlierHistory(sid: string, beforeInsert: () => void): Promise<void> {
+ const st = useApp.getState();
+ const current = st.historyPages[sid];
+ if (!current || current.before === null || current.loading) return;
+ const before = current.before;
+ const loadingState = { ...current, loading: true, error: null };
+ st.set({ historyPages: { ...st.historyPages, [sid]: loadingState } });
+ try {
+  const page = await api.getHistory(sid, before);
+  const latest = useApp.getState();
+  const state = latest.historyPages[sid];
+  if (state !== loadingState) return;
+  const parsed = viewMsgsFromJsonlLines(page.lines, TEXT[latest.locale], { before: page.before ?? null, lineOffsets: page.lineOffsets });
+  const olderHasUser = parsed.some((m) => m.kind === "user");
+  const reachedStart = page.before == null && !state.skipped && !page.skipped;
+  const records = { ...state.records };
+  const existing = (latest.eventsBySession[sid] ?? []).flatMap((m) => {
+   if (m.kind !== "divider" || !m.pendingPriorUser) return [m];
+   if (olderHasUser) {
+    const resolved = { ...m, pendingPriorUser: false };
+    if (records[m.id] === m) records[m.id] = resolved;
+    return [resolved];
+   }
+   if (reachedStart) {
+    if (records[m.id] === m) delete records[m.id];
+    return [];
+   }
+   return [m];
+  });
+  const byId = new Map(existing.map((m) => [m.id, m]));
+  const moved = new Set<string>();
+  const localByKey = new Map<string, string[]>();
+  const parsedIds = new Set(parsed.map((m) => m.id));
+  for (const m of existing) {
+   if (state.records[m.id] === m || parsedIds.has(m.id)) continue;
+   const key = localPairKey(m);
+   if (!key) continue;
+   const ids = localByKey.get(key) ?? [];
+   ids.push(m.id);
+   localByKey.set(key, ids);
+  }
+  const rows = parsed.flatMap((m) => {
+   const later = byId.get(m.id);
+   if (!later) {
+    const key = historyPairKey(m);
+    const local = key ? localByKey.get(key)?.shift() : undefined;
+    if (local) moved.add(local);
+    return [m];
+   }
+   // 调用和结果可能跨页：以较早的调用位置放合并卡，保留较晚的终态和输出。
+   if (m.kind === "tool" && later.kind === "tool") {
+    moved.add(m.id);
+    return [mergeToolCard(m, later)];
+   }
+   return [];
+  });
+  for (const row of rows) records[row.id] = row;
+  beforeInsert();
+  latest.set({
+   eventsBySession: { ...latest.eventsBySession, [sid]: [...rows, ...existing.filter((m) => !moved.has(m.id))] },
+   historyPages: { ...latest.historyPages, [sid]: { ...state, before: page.before ?? null, records, skipped: state.skipped || !!page.skipped, loading: false, error: null } },
+  });
+ } catch (error) {
+  const latest = useApp.getState();
+  const state = latest.historyPages[sid];
+  if (state === loadingState) {
+   latest.set({ historyPages: { ...latest.historyPages, [sid]: { ...state, loading: false, error: error instanceof Error ? error.message : String(error) } } });
+  }
+ }
+}
 
 /**
  * 打开会话时调用方**手上已有的列表行**（左栏扫描行 / 归档行 / store 行 / 新建结果）：
@@ -280,14 +353,31 @@ export async function openSessionWithHistory(
  }
  try {
   const page = await api.getHistory(realId);
-  const cur = useApp.getState();
+  let cur = useApp.getState();
+  const previous = cur.historyPages[realId];
+  // 新旧文件区间没有交集时，旧游标无法覆盖中间的记录；丢掉旧历史快照并从最新页重建。
+  // 仅移除对象仍与快照相同的行：实时更新过的卡和未确认的乐观消息必须保留。
+  const gap = previous && page.end !== undefined && previous.end > 0 &&
+   (page.end < previous.end || (page.before != null && page.before > previous.end));
+  if (gap) {
+   const remaining = (cur.eventsBySession[realId] ?? []).filter((m) => previous.records[m.id] !== m);
+   const historyPages = { ...cur.historyPages };
+   delete historyPages[realId];
+   cur.set({ eventsBySession: { ...cur.eventsBySession, [realId]: remaining }, historyPages });
+   cur = useApp.getState();
+  }
   // 同一会话重复打开不叠历史：tool 卡按 toolCallId 稳定 id，其余按行 id。
   // 乐观回显的 `u-local-*` 消息：历史里同一文本的 `u:<行id>` 到达时视为同一条，
   // 用历史版本替换本地版（行 id 稳定），不翻倍。
   const cur_list = cur.eventsBySession[realId] ?? [];
   const seen = new Set(cur_list.map((m) => m.id));
-  const historyRows = viewMsgsFromJsonlLines(page.lines, TEXT[useApp.getState().locale]);
+  let historyRows = viewMsgsFromJsonlLines(page.lines, TEXT[useApp.getState().locale], { before: page.before ?? null, lineOffsets: page.lineOffsets });
   const historyIds = new Set(historyRows.map((m) => m.id));
+  // 新页之前已缓存到用户消息，则页首配置变更确定发生在首条用户消息之后。
+  const olderUserCached = !gap && previous && Object.values(previous.records).some((m) => m.kind === "user" && !historyIds.has(m.id));
+  if (olderUserCached) {
+   historyRows = historyRows.map((m) => m.kind === "divider" && m.pendingPriorUser ? { ...m, pendingPriorUser: false } : m);
+  }
   // 实时行与历史行**对不上 id**（实时 id 由会话 + 消息序号 + contentIndex 拼出，历史 id
   // 取自 jsonl 的行 id），但同一条消息会在两边各出现一次——不配对就会「重新打开会话，
   // 助手回复翻倍」（实时流过的会话切走再切回必然命中，V34 的历史 LRU 让缓存还留着）。
@@ -329,17 +419,24 @@ export async function openSessionWithHistory(
    return true;
   });
   if (fresh.length > 0) useApp.getState().appendEvents(realId, fresh);
-  // 回放超限（5000 行 / 2000 条）时在流尾注明——绝不静默丢内容。
-  // 固定 id + 先查已有：重复打开同一会话不叠第二条。
+  // 重开时保留已经向前加载过的游标，避免重复加载已在缓存中的页。
+  const latest = useApp.getState();
+  const oldPage = latest.historyPages[realId];
+  const records = { ...oldPage?.records };
+  for (const m of latest.eventsBySession[realId] ?? []) {
+   if (historyIds.has(m.id) && (!seen.has(m.id) || previous?.records[m.id] === m)) records[m.id] = m;
+  }
+  latest.set({ historyPages: { ...latest.historyPages, [realId]: {
+   before: oldPage ? oldPage.before : page.before ?? null,
+   end: page.end ?? oldPage?.end ?? 0,
+   records,
+   skipped: !!oldPage?.skipped || !!page.skipped,
+   loading: false,
+   error: null,
+  } } });
+  // 兼容尚未升级的旧回包。
   if (page.truncated && !cur_list.some((m) => m.id === "hist-truncated")) {
-   useApp.getState().appendEvents(realId, [
-    {
-     kind: "divider",
-     id: "hist-truncated",
-     divider: "turn",
-     text: TEXT[useApp.getState().locale].historyTruncated,
-    },
-   ]);
+   useApp.getState().appendEvents(realId, [{ kind: "divider", id: "hist-truncated", divider: "turn", text: TEXT[useApp.getState().locale].historyTruncated }]);
   }
   // 身份漂移（forked）时的说明行：把「为什么列表里多了一个同名会话」讲清楚——
   // 那是 omp 在「会话已被别处打开」保护下自动分叉的副本，原会话不受影响。固定 id：
@@ -356,8 +453,14 @@ export async function openSessionWithHistory(
   }
   // 历史落位后再读一次底，保证停在最新处（慢历史期间用户已切走就别拽别人的消息列）
   if (useApp.getState().activeSessionId === realId) scrollThreadToBottom();
- } catch {
-  // 历史加载失败不阻塞选中
+ } catch (error) {
+  // 新会话在首轮前尚未落盘，找不到文件属于正常情况。
+  const cause = error && typeof error === "object" && "cause" in error ? error.cause : error;
+  if (!(cause && typeof cause === "object" && "code" in cause && cause.code === "NOT_FOUND")) {
+   const latest = useApp.getState();
+   const current = latest.historyPages[realId];
+   latest.set({ historyPages: { ...latest.historyPages, [realId]: { before: current?.before ?? null, end: current?.end ?? 0, records: current?.records ?? {}, skipped: current?.skipped ?? false, loading: false, error: error instanceof Error ? error.message : String(error) } } });
+  }
  }
  // 结果口径：`ok` 反映**打开本身**成不成（spawn / 握手），历史加载失败不算打开失败；
  // 身份漂移时返回真实身份（调用方要按它继续，见上面的说明）。

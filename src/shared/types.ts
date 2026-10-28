@@ -1324,6 +1324,8 @@ type ViewMsgBase =
   /** `subagent` = 子代理生命周期行（v2 §2.1 的紧凑行，不带分隔线）。 */
   divider: "model" | "thinking" | "exit" | "turn" | "subagent" | "reminder";
   text: string;
+  /** 分页时尚无法确认之前是否有用户消息，暂不展示初始模型配置。 */
+  pendingPriorUser?: boolean;
  }
  /**
   * 本地命令输出（`/` 命令经 `command_output` 透传）：无 agent turn，

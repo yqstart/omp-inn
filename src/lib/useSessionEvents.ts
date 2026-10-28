@@ -646,8 +646,7 @@ export function __resetHistoryLru() {
  *
  * 为什么需要：`eventsBySession` 里每个**打开过**的会话都会留下全量消息（工具全量
  * 输出文本也在里面），浏览十来个长会话就是几百 MB 到 GB 级的常驻内存。
- * 清掉是安全的——切回会话时 `openSessionWithHistory` 本来就每次 `get_history`
- * 全量重拉（合并按 id 去重，空基底天然支持）。
+ * 清掉是安全的——切回会话时 `openSessionWithHistory` 会重新读取最新一页。
  *
  * 正在跑 / 等审批的会话不动：它们的流还在写，用户随时可能切回去看中间态。
  */
@@ -658,6 +657,7 @@ export function trimSessionHistories(activeId: string | null, keep = KEEP_HISTOR
  const st = useApp.getState();
  let changed = false;
  const next: Record<string, ViewMsg[]> = {};
+ const historyPages = { ...st.historyPages };
  for (const [sid, msgs] of Object.entries(st.eventsBySession)) {
   const running = st.statusBySession[sid]?.state;
   if (keepSet.has(sid) || running === "running" || running === "awaiting-approval") {
@@ -665,9 +665,17 @@ export function trimSessionHistories(activeId: string | null, keep = KEEP_HISTOR
   } else {
    changed = true;
    folds.delete(sid);
+   delete historyPages[sid];
   }
  }
- if (changed) st.set({ eventsBySession: next });
+ for (const sid of Object.keys(historyPages)) {
+  const running = st.statusBySession[sid]?.state;
+  if (!keepSet.has(sid) && running !== "running" && running !== "awaiting-approval") {
+   delete historyPages[sid];
+   changed = true;
+  }
+ }
+ if (changed) st.set({ eventsBySession: next, historyPages });
 }
 
 /**
@@ -684,6 +692,7 @@ export function forgetSession(sid: string): void {
  const st = useApp.getState();
  if (
   !(sid in st.eventsBySession) &&
+  !(sid in st.historyPages) &&
   !(sid in st.statusBySession) &&
   !(sid in st.plansBySession) &&
   !(sid in st.planCardBySession) &&
@@ -695,6 +704,7 @@ export function forgetSession(sid: string): void {
   return;
  }
  const events = { ...st.eventsBySession };
+ const historyPages = { ...st.historyPages };
  const status = { ...st.statusBySession };
  const plans = { ...st.plansBySession };
  const planCards = { ...st.planCardBySession };
@@ -703,6 +713,7 @@ export function forgetSession(sid: string): void {
  const queued = { ...st.queuedBySession };
  const subs = { ...st.subagentsBySession };
  delete events[sid];
+ delete historyPages[sid];
  delete status[sid];
  delete plans[sid];
  delete planCards[sid];
@@ -712,6 +723,7 @@ export function forgetSession(sid: string): void {
  delete subs[sid];
  st.set({
   eventsBySession: events,
+  historyPages,
   statusBySession: status,
   plansBySession: plans,
   planCardBySession: planCards,
